@@ -1,0 +1,28 @@
+﻿# 依赖
+node_modules/
+
+# 构建产物
+dist/
+build/
+out/
+
+# 临时文件
+*.tmp
+*.temp
+*.log
+*.bak
+*.swp
+*~
+Thumbs.db
+.DS_Store
+
+# Chrome 扩展缓存/打包文件
+*.crx
+*.pem
+*.zip
+*.tar.gz
+._*
+
+# 编辑器
+.vscode/
+.idea/
