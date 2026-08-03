@@ -1,20 +1,17 @@
 ﻿/**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.3.5)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.5.2)
  *
  * 监控类型：
- * - page：页面变化（整页 hash）
- * - link：下载链接变化（扫描 a 标签，用户选择目标链接）
- * - element：网页元素变化（content script 点选元素，保存 CSS selector）
+ * - page：整个网页变化（整页 hash）
+ * - element：指定内容变化（CSS selector + 属性 text/href/src）
  *
- * 其他：防重复 / 覆盖确认 / 编辑模式 / 立即检查 / 测试通知 / Chrome 同步
- *      未读徽标 / 通知历史（chrome.storage.local）/ 点击名称打开网址
+ * 兼容：
+ * - 旧 type="link" 由 background 迁移为 type="element" + attribute="href"
  */
-
-const DEBUG = false; // 发布版关闭信息日志
-function dbg(...args) { if (DEBUG) console.log(...args); }
 
 const form = document.getElementById('monitor-form');
 const inputType = document.getElementById('input-type');
+const inputAttribute = document.getElementById('input-attribute');
 const inputName = document.getElementById('input-name');
 const inputUrl = document.getElementById('input-url');
 const inputInterval = document.getElementById('input-interval');
@@ -30,11 +27,6 @@ const cancelEditBtn = document.getElementById('cancel-edit-btn');
 const overwriteConfirm = document.getElementById('overwrite-confirm');
 const confirmOverwriteBtn = document.getElementById('confirm-overwrite-btn');
 const cancelOverwriteBtn = document.getElementById('cancel-overwrite-btn');
-
-const linkSection = document.getElementById('link-section');
-const scanLinksBtn = document.getElementById('scan-links-btn');
-const linkResults = document.getElementById('link-results');
-const selectedLinkInfo = document.getElementById('selected-link-info');
 
 const elementSection = document.getElementById('element-section');
 const pickElementBtn = document.getElementById('pick-element-btn');
@@ -55,9 +47,11 @@ const hasScripting = typeof chrome !== 'undefined' && chrome.scripting && chrome
 
 // ---- 状态 ----
 let editingId = null;
-let selectedLink = null;    // { href, text }
 let pickedElement = null;   // { selector, attribute, text, href, pageUrl, pageTitle, tagName }
 let historyExpanded = false;
+
+const DEBUG = false; // 发布版关闭信息日志，调试时改为 true
+function dbg(...args) { if (DEBUG) console.log(...args); }
 
 // ---- 同步状态显示 ----
 function renderSyncBadge() {
@@ -122,12 +116,10 @@ async function renderUnread() {
   const history = await getHistory();
   const unread = history.filter((h) => !h.read).length;
 
-  // 头部未读徽标
   unreadBadge.textContent = unread;
   unreadBadge.classList.toggle('hidden', unread === 0);
   unreadBadge.title = unread > 0 ? unread + ' 条未读提醒' : '';
 
-  // 通知卡片：醒目标识 + 摘要
   notifyDot.classList.toggle('hidden', unread === 0);
   notifyCard.classList.toggle('has-unread', unread > 0);
   markAllReadBtn.classList.toggle('hidden', unread === 0);
@@ -140,7 +132,7 @@ async function renderUnread() {
   }
 }
 
-// ---- 通知历史展开 / 标记已读 ----
+// ---- 通知历史展开 ----
 historyToggle.addEventListener('click', async () => {
   historyExpanded = !historyExpanded;
   historyList.classList.toggle('hidden', !historyExpanded);
@@ -151,7 +143,7 @@ historyToggle.addEventListener('click', async () => {
 });
 
 markAllReadBtn.addEventListener('click', async (e) => {
-  e.stopPropagation(); // 避免触发卡片展开/收起
+  e.stopPropagation();
   await markAllHistoryRead();
   if (historyExpanded) await renderHistoryList();
 });
@@ -169,7 +161,6 @@ async function markAllHistoryRead() {
   const history = await getHistory();
   if (!history.some((h) => !h.read)) return;
   await saveHistory(history.map((h) => ({ ...h, read: true })));
-  // background 的 storage.onChanged 会自动清零扩展角标
   renderUnread();
 }
 
@@ -227,7 +218,16 @@ function openUrl(url) {
   }
 }
 
-// ---- 页脚 GitHub 链接（popup 中 <a href> 无法直接跳转，需用 chrome.tabs.create） ----
+// ---- 页脚版本号 ----
+(function renderFooterVersion() {
+  const el = document.getElementById('footer-version');
+  if (!el) return;
+  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getManifest) {
+    el.textContent = '333 Watcher v' + chrome.runtime.getManifest().version;
+  }
+})();
+
+// ---- 页脚 GitHub 链接 ----
 document.getElementById('about-link').addEventListener('click', (e) => {
   e.preventDefault();
   openUrl('https://github.com/lijianbin2/333watch');
@@ -236,15 +236,17 @@ document.getElementById('about-link').addEventListener('click', (e) => {
 // ---- 类型切换 ----
 function syncTypeSections() {
   const t = inputType.value;
-  linkSection.classList.toggle('hidden', t !== 'link');
   elementSection.classList.toggle('hidden', t !== 'element');
-  if (t !== 'link') {
-    clearSelectedLink();
-    linkResults.classList.add('hidden');
-  }
 }
 
 inputType.addEventListener('change', syncTypeSections);
+
+// 属性标签
+function attributeLabel(attr) {
+  if (attr === 'href') return '链接地址';
+  if (attr === 'src') return '图片地址';
+  return '文本内容';
+}
 
 // ---- 元素点选 ----
 pickElementBtn.addEventListener('click', async () => {
@@ -262,7 +264,6 @@ pickElementBtn.addEventListener('click', async () => {
       target: { tabId: tab.id },
       files: ['picker.js']
     });
-    // 关闭 popup，让用户在页面上点选元素
     window.close();
   } catch (err) {
     console.error('[333 Watcher] picker inject failed:', err);
@@ -271,9 +272,9 @@ pickElementBtn.addEventListener('click', async () => {
 });
 
 function showPickedInfo(pick, prefix) {
-  const attrLabel = pick.attribute === 'href' ? '链接地址' : '文本内容';
+  const label = attributeLabel(pick.attribute);
   const sample = pick.attribute === 'href' ? (pick.href || '') : (pick.text || '');
-  pickedInfo.textContent = (prefix || '已选择：') + (pick.tagName || '元素') + ' · ' + attrLabel +
+  pickedInfo.textContent = (prefix || '已选择：') + (pick.tagName || '元素') + ' · ' + label +
     (sample ? ' · ' + sample.slice(0, 40) : '');
   pickedInfo.title = pick.selector || '';
   pickedInfo.classList.remove('hidden');
@@ -292,7 +293,6 @@ async function clearPendingPick() {
   }
 }
 
-// 打开 popup 时读取点选结果（优先于 active tab 自动填充）
 async function loadPendingPick() {
   if (!hasChromeStorage || editingId !== null) return false;
   try {
@@ -300,6 +300,7 @@ async function loadPendingPick() {
     if (!pendingPick || !pendingPick.selector) return false;
     pickedElement = pendingPick;
     inputType.value = 'element';
+    inputAttribute.value = pendingPick.attribute || 'text';
     inputUrl.value = pendingPick.pageUrl || '';
     inputName.value = pendingPick.pageTitle || pendingPick.text || '';
     syncTypeSections();
@@ -312,97 +313,18 @@ async function loadPendingPick() {
   }
 }
 
-// ---- 链接扫描 ----
-scanLinksBtn.addEventListener('click', async () => {
-  const url = inputUrl.value.trim();
-  if (!url) {
-    showStatus('请先填写监控网址', true);
-    return;
-  }
-
-  scanLinksBtn.disabled = true;
-  scanLinksBtn.textContent = '扫描中...';
-  hideStatus();
-
-  try {
-    const res = await fetch(url, { cache: 'no-store' });
-    const html = await res.text();
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-    const anchors = Array.from(doc.querySelectorAll('a[href]'));
-
-    const links = [];
-    for (const a of anchors) {
-      let href = (a.getAttribute('href') || '').trim();
-      const text = a.textContent.replace(/\s+/g, ' ').trim();
-      if (!href || href.startsWith('javascript:') || href.startsWith('#') || href.startsWith('mailto:')) continue;
-      try {
-        href = new URL(href, url).href;
-      } catch {
-        continue;
-      }
-      links.push({ href, text });
-    }
-
-    renderLinkResults(links);
-    if (links.length === 0) {
-      showStatus('未扫描到链接（页面可能是 JS 动态渲染）', true);
-    }
-  } catch (err) {
-    console.error('[333 Watcher] link scan failed:', err);
-    showStatus('扫描失败：' + err.message, true);
-  } finally {
-    scanLinksBtn.disabled = false;
-    scanLinksBtn.textContent = '扫描页面链接';
+inputAttribute.addEventListener('change', () => {
+  if (pickedElement) {
+    pickedElement.attribute = inputAttribute.value;
+    showPickedInfo(pickedElement);
   }
 });
-
-function renderLinkResults(links) {
-  linkResults.innerHTML = '';
-  linkResults.classList.remove('hidden');
-
-  for (const link of links) {
-    const item = document.createElement('button');
-    item.type = 'button';
-    item.className = 'link-item';
-
-    const text = document.createElement('span');
-    text.className = 'link-item-text';
-    text.textContent = link.text || '(无文字)';
-
-    const href = document.createElement('span');
-    href.className = 'link-item-href';
-    href.textContent = link.href;
-
-    item.appendChild(text);
-    item.appendChild(href);
-    item.addEventListener('click', () => {
-      linkResults.querySelectorAll('.link-item.selected').forEach((el) => el.classList.remove('selected'));
-      item.classList.add('selected');
-      selectLink(link);
-    });
-
-    linkResults.appendChild(item);
-  }
-}
-
-function selectLink(link) {
-  selectedLink = link;
-  selectedLinkInfo.textContent = '已选择：' + (link.text || link.href);
-  selectedLinkInfo.title = link.href;
-  selectedLinkInfo.classList.remove('hidden');
-  hideStatus();
-}
-
-function clearSelectedLink() {
-  selectedLink = null;
-  selectedLinkInfo.classList.add('hidden');
-  selectedLinkInfo.textContent = '';
-}
 
 // ---- 编辑态切换 ----
 function enterEditMode(monitor) {
   editingId = monitor.id;
   inputType.value = monitor.type || 'page';
+  inputAttribute.value = monitor.attribute || 'text';
   inputName.value = monitor.name || '';
   inputUrl.value = monitor.url || '';
   inputInterval.value = monitor.interval || 1000;
@@ -411,10 +333,6 @@ function enterEditMode(monitor) {
   hidePickedInfo();
   pickedElement = null;
 
-  if (monitor.type === 'link' && (monitor.targetText || monitor.targetHref)) {
-    selectedLinkInfo.textContent = '当前目标：' + (monitor.targetText || monitor.targetHref) + '（可重新扫描更换）';
-    selectedLinkInfo.classList.remove('hidden');
-  }
   if (monitor.type === 'element' && monitor.selector) {
     showPickedInfo({
       tagName: '元素',
@@ -436,6 +354,7 @@ function exitEditMode() {
   editingId = null;
   form.reset();
   inputType.value = 'page';
+  inputAttribute.value = 'text';
   inputInterval.value = 1000;
   syncTypeSections();
   hidePickedInfo();
@@ -484,13 +403,6 @@ form.addEventListener('submit', async (e) => {
   const data = collectFormData();
   const monitors = await getMonitors();
 
-  // link 类型新增时必须选择目标链接
-  if (data.type === 'link' && !selectedLink && editingId === null) {
-    showStatus('请先扫描并选择一个下载链接', true);
-    return;
-  }
-
-  // element 类型新增时必须已点选元素
   if (data.type === 'element' && !pickedElement && editingId === null) {
     showStatus('请先点击「选择网页元素」在页面上点选目标', true);
     return;
@@ -512,52 +424,40 @@ form.addEventListener('submit', async (e) => {
       interval: data.interval,
       type: data.type
     };
-    if (data.type === 'link') {
-      if (selectedLink) {
-        updated.targetHref = selectedLink.href;
-        updated.targetText = selectedLink.text;
-        updated.lastValue = selectedLink.href;
-      }
-      updated.selector = '';
-      updated.attribute = '';
-      updated.lastHash = '';
-    } else if (data.type === 'element') {
+    if (data.type === 'element') {
       if (pickedElement) {
         updated.selector = pickedElement.selector;
-        updated.attribute = pickedElement.attribute;
-        updated.lastValue = pickedElement.attribute === 'href' ? pickedElement.href : pickedElement.text;
+        updated.attribute = inputAttribute.value;
+        updated.lastValue = attributeValue(pickedElement, updated.attribute);
+      } else {
+        updated.attribute = inputAttribute.value; // 保留旧 selector，只改属性也可
+        updated.lastValue = '';
       }
-      updated.targetHref = '';
-      updated.targetText = '';
       updated.lastHash = '';
     } else {
-      // page 类型：清掉 link / element 字段；URL 变了重置 hash 基线
-      updated.targetHref = '';
-      updated.targetText = '';
+      // page 类型：清掉 element 字段；URL 变了重置 hash 基线
       updated.selector = '';
       updated.attribute = '';
       updated.lastValue = '';
       updated.lastHash = normalizeUrl(old.url) === data.url && old.type === 'page' ? old.lastHash : '';
     }
+    updated.targetHref = '';
+    updated.targetText = '';
     monitors[idx] = updated;
     await saveMonitors(monitors);
     dbg('[333 Watcher] Monitor updated:', updated);
-    const wasEdit = true;
     exitEditMode();
-    if (wasEdit && data.type === 'element') await clearPendingPick();
+    await clearPendingPick();
     showStatus('修改已保存 ✓', false);
     renderList();
     return;
   }
 
   // 新增模式：重复检测
-  // page: 同 URL；link: 同 URL + 同目标链接；element: 同 URL + 同 selector
+  // page: 同 URL；element: 同 URL + 同 selector
   const existing = monitors.find((m) => {
     if (normalizeUrl(m.url || '') !== data.url) return false;
     if ((m.type || 'page') !== data.type) return false;
-    if (data.type === 'link') {
-      return selectedLink && normalizeUrl(m.targetHref || '') === normalizeUrl(selectedLink.href);
-    }
     if (data.type === 'element') {
       return pickedElement && (m.selector || '') === pickedElement.selector;
     }
@@ -571,22 +471,25 @@ form.addEventListener('submit', async (e) => {
   await addMonitor(data);
 });
 
+function attributeValue(pick, attr) {
+  if (attr === 'href') return pick.href || '';
+  if (attr === 'src') return pick.src || '';
+  return pick.text || '';
+}
+
 // ---- 新增 ----
 async function addMonitor(data) {
   const monitors = await getMonitors();
+  const attribute = data.type === 'element' ? inputAttribute.value : '';
   const monitor = {
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     name: data.name,
     url: data.url,
     interval: data.interval,
     type: data.type,
-    targetHref: data.type === 'link' ? selectedLink.href : '',
-    targetText: data.type === 'link' ? selectedLink.text : '',
     selector: data.type === 'element' ? pickedElement.selector : '',
-    attribute: data.type === 'element' ? pickedElement.attribute : '',
-    lastValue: data.type === 'element'
-      ? (pickedElement.attribute === 'href' ? pickedElement.href : pickedElement.text)
-      : (data.type === 'link' ? selectedLink.href : ''),
+    attribute: data.type === 'element' ? attribute : '',
+    lastValue: data.type === 'element' ? attributeValue(pickedElement, attribute) : '',
     createdAt: new Date().toISOString(),
     lastHash: '',
     lastCheck: '',
@@ -600,6 +503,7 @@ async function addMonitor(data) {
   showStatus('已保存 ✓', false);
   form.reset();
   inputType.value = 'page';
+  inputAttribute.value = 'text';
   inputInterval.value = 1000;
   syncTypeSections();
   renderList();
@@ -639,28 +543,19 @@ confirmOverwriteBtn.addEventListener('click', async () => {
       interval: data.interval,
       type: data.type
     };
-    if (data.type === 'link' && selectedLink) {
-      updated.targetHref = selectedLink.href;
-      updated.targetText = selectedLink.text;
-      updated.lastValue = selectedLink.href;
-      updated.selector = '';
-      updated.attribute = '';
-      updated.lastHash = '';
-    } else if (data.type === 'element' && pickedElement) {
+    if (data.type === 'element' && pickedElement) {
       updated.selector = pickedElement.selector;
-      updated.attribute = pickedElement.attribute;
-      updated.lastValue = pickedElement.attribute === 'href' ? pickedElement.href : pickedElement.text;
-      updated.targetHref = '';
-      updated.targetText = '';
-      updated.lastHash = '';
+      updated.attribute = inputAttribute.value;
+      updated.lastValue = attributeValue(pickedElement, updated.attribute);
     } else if (data.type === 'page') {
-      updated.targetHref = '';
-      updated.targetText = '';
       updated.selector = '';
       updated.attribute = '';
       updated.lastValue = '';
       updated.lastHash = normalizeUrl(old.url) === data.url ? old.lastHash : '';
     }
+    updated.targetHref = '';
+    updated.targetText = '';
+    updated.lastHash = '';
     monitors[idx] = updated;
     await saveMonitors(monitors);
     dbg('[333 Watcher] Monitor overwritten:', updated);
@@ -669,6 +564,7 @@ confirmOverwriteBtn.addEventListener('click', async () => {
   showStatus('已覆盖保存 ✓', false);
   form.reset();
   inputType.value = 'page';
+  inputAttribute.value = 'text';
   inputInterval.value = 1000;
   syncTypeSections();
   renderList();
@@ -685,9 +581,8 @@ cancelOverwriteBtn.addEventListener('click', () => {
 
 // ---- 监控列表渲染 ----
 function typeLabel(m) {
-  if (m.type === 'link') return '下载链接';
-  if (m.type === 'element') return '网页元素';
-  return '页面';
+  if (m.type === 'element') return '指定内容';
+  return '整个网页';
 }
 
 async function renderList() {
@@ -702,7 +597,6 @@ async function renderList() {
     const info = document.createElement('div');
     info.className = 'watcher-info';
 
-    // 名称可点击：打开监控网址
     const name = document.createElement('a');
     name.className = 'watcher-url watcher-link';
     name.textContent = m.name || m.url;
@@ -717,14 +611,14 @@ async function renderList() {
     const meta = document.createElement('p');
     meta.className = 'watcher-meta';
     let metaText = typeLabel(m) + ' · 每 ' + m.interval + ' 分钟';
-    if (m.type === 'link' && m.targetText) {
-      metaText += ' · ' + m.targetText;
+    if (m.type === 'element' && m.attribute) {
+      metaText += ' · ' + attributeLabel(m.attribute);
     }
     if (m.type === 'element' && m.selector) {
-      metaText += ' · ' + (m.attribute === 'href' ? '链接' : '文本');
+      metaText += ' · ' + m.selector;
     }
     meta.textContent = metaText;
-    meta.title = m.targetHref || m.selector || '';
+    meta.title = m.selector || '';
     info.appendChild(meta);
 
     const actions = document.createElement('div');
@@ -777,7 +671,7 @@ async function checkNow(id, btn) {
       showStatus('检测到变化，已发送通知 ✓', false);
       renderUnread();
     } else if (res.result === 'not-found') {
-      showStatus('未找到目标元素/链接，页面结构可能已变化', true);
+      showStatus('未找到目标元素，页面结构可能已变化', true);
     } else {
       showStatus('暂无变化', false);
     }
@@ -841,15 +735,6 @@ if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged)
   });
 }
 
-// ---- 页脚版本号：动态读取 manifest ----
-(function renderFooterVersion() {
-  const el = document.getElementById('footer-version');
-  if (!el) return;
-  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getManifest) {
-    el.textContent = '333 Watcher v' + chrome.runtime.getManifest().version;
-  }
-})();
-
 // ---- 初始化 ----
 (async function init() {
   renderSyncBadge();
@@ -860,7 +745,3 @@ if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged)
     fillFromActiveTab();
   }
 })();
-
-
-
-

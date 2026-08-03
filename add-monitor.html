@@ -8,7 +8,6 @@
 </head>
 <body>
   <div class="container">
-    <!-- 标题 -->
     <header class="header">
       <div class="logo-dot"></div>
       <h1 class="title">333 Watcher</h1>
@@ -16,7 +15,6 @@
       <span id="sync-badge" class="sync-badge">Chrome 同步：已启用</span>
     </header>
 
-    <!-- 未读通知卡片（顶部） -->
     <section id="notify-card" class="notify-card">
       <button type="button" id="history-toggle" class="notify-card-header">
         <span class="notify-card-title">
@@ -32,20 +30,17 @@
       <ul id="history-list" class="history-list hidden"></ul>
     </section>
 
-    <!-- 编辑状态横幅 -->
     <div id="editing-banner" class="editing-banner hidden">
       <span>正在编辑</span>
       <button type="button" id="cancel-edit-btn" class="btn-ghost-small">取消编辑</button>
     </div>
 
-    <!-- 添加监控 -->
     <form id="monitor-form" class="add-form">
       <label class="field">
         <span class="field-label">监控类型</span>
         <select id="input-type">
-          <option value="page">页面变化</option>
-          <option value="link">下载链接变化</option>
-          <option value="element">网页元素变化</option>
+          <option value="page">整个网页变化</option>
+          <option value="element">指定内容变化</option>
         </select>
       </label>
       <label class="field">
@@ -62,14 +57,16 @@
       </label>
 
       <div id="element-section" class="element-section hidden">
+        <label class="field">
+          <span class="field-label">监控目标</span>
+          <select id="input-attribute">
+            <option value="text">文字内容（版本号、标题等）</option>
+            <option value="href">链接地址（下载按钮等）</option>
+            <option value="src">图片地址（预留）</option>
+          </select>
+        </label>
         <button type="button" id="pick-element-btn" class="btn-ghost">选择网页元素</button>
         <div id="picked-info" class="selected-info hidden"></div>
-      </div>
-
-      <div id="link-section" class="link-section hidden">
-        <button type="button" id="scan-links-btn" class="btn-ghost">扫描页面链接</button>
-        <div id="selected-link-info" class="selected-info hidden"></div>
-        <div id="link-results" class="link-results hidden"></div>
       </div>
 
       <button type="submit" id="submit-btn" class="btn-primary">保存监控</button>
@@ -85,13 +82,11 @@
       </div>
     </div>
 
-    <!-- 已保存监控列表 -->
     <section class="monitor-section">
       <p class="section-label">已保存的监控（<span id="monitor-count">0</span>）</p>
       <ul id="monitor-list" class="watcher-list"></ul>
     </section>
 
-    <!-- 设置 / 关于 -->
     <footer class="footer">
       <span id="footer-version" class="footer-version">333 Watcher v0.5.1</span>
       <a id="about-link" class="footer-link" href="https://github.com/lijianbin2/333watch">GitHub</a>
@@ -101,4 +96,3 @@
   <script src="add-monitor.js"></script>
 </body>
 </html>
-

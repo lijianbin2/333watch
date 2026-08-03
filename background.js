@@ -84,23 +84,37 @@ async function migrateData() {
     dbg('[333 Watcher] migrated legacy watchers -> monitors');
   }
 
-  const normalized = monitors.map((m) => ({
-    id: m.id,
-    name: m.name || m.url,
-    url: normalizeUrl(m.url),
-    interval: Math.max(1, Number(m.interval) || 1000),
-    type: m.type || 'page',
-    selector: m.selector || '',
-    attribute: m.attribute || '',
-    targetHref: m.targetHref || '',
-    targetText: m.targetText || '',
-    lastValue: m.lastValue || '',
-    createdAt: m.createdAt || new Date().toISOString(),
-    lastHash: m.lastHash || '',
-    lastCheck: m.lastCheck || '',
-    lastCheckTime: m.lastCheckTime || 0,
-    nextCheckTime: m.nextCheckTime || 0
-  }));
+  const normalized = monitors.map((m) => {
+    // 兼容旧 type="link" / "download"：统一转为指定内容监控，链接地址
+    if (m.type === 'link' || m.type === 'download') {
+      m.type = 'element';
+      m.attribute = 'href';
+      if (!m.selector && m.targetHref) {
+        // 旧 link 数据没有 selector，保留 targetHref 用于后台回退检测
+        m.selector = '';
+      }
+      if (!m.lastValue && m.targetHref) {
+        m.lastValue = m.targetHref;
+      }
+    }
+    return {
+      id: m.id,
+      name: m.name || m.url,
+      url: normalizeUrl(m.url),
+      interval: Math.max(1, Number(m.interval) || 1000),
+      type: m.type || 'page',
+      selector: m.selector || '',
+      attribute: m.attribute || '',
+      targetHref: m.targetHref || '',
+      targetText: m.targetText || '',
+      lastValue: m.lastValue || '',
+      createdAt: m.createdAt || new Date().toISOString(),
+      lastHash: m.lastHash || '',
+      lastCheck: m.lastCheck || '',
+      lastCheckTime: m.lastCheckTime || 0,
+      nextCheckTime: m.nextCheckTime || 0
+    };
+  });
 
   if (migrated || JSON.stringify(normalized) !== JSON.stringify(monitors)) {
     await saveMonitors(normalized);
@@ -261,8 +275,12 @@ async function checkMonitor(monitor) {
   const type = monitor.type || 'page';
   let outcome;
   if (type === 'element') {
-    outcome = await checkElement(monitor, html);
-  } else if (type === 'link') {
+    if (!monitor.selector && (monitor.targetHref || monitor.targetText)) {
+      outcome = await checkLink(monitor, html);
+    } else {
+      outcome = await checkElement(monitor, html);
+    }
+  } else if (type === 'link' || type === 'download') {
     outcome = await checkLink(monitor, html);
   } else {
     outcome = await checkPage(monitor, html);
@@ -497,4 +515,6 @@ async function catchUpChecks() {
 chrome.runtime.onStartup.addListener(async () => {
   await catchUpChecks();
 });
+
+
 
