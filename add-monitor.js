@@ -227,6 +227,12 @@ function openUrl(url) {
   }
 }
 
+// ---- 页脚 GitHub 链接（popup 中 <a href> 无法直接跳转，需用 chrome.tabs.create） ----
+document.getElementById('about-link').addEventListener('click', (e) => {
+  e.preventDefault();
+  openUrl('https://github.com/lijianbin2/333watch');
+});
+
 // ---- 类型切换 ----
 function syncTypeSections() {
   const t = inputType.value;
@@ -845,5 +851,6 @@ if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged)
     fillFromActiveTab();
   }
 })();
+
 
 
