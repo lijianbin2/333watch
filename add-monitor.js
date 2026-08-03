@@ -841,6 +841,15 @@ if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged)
   });
 }
 
+// ---- 页脚版本号：动态读取 manifest ----
+(function renderFooterVersion() {
+  const el = document.getElementById('footer-version');
+  if (!el) return;
+  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getManifest) {
+    el.textContent = '333 Watcher v' + chrome.runtime.getManifest().version;
+  }
+})();
+
 // ---- 初始化 ----
 (async function init() {
   renderSyncBadge();
@@ -851,6 +860,7 @@ if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged)
     fillFromActiveTab();
   }
 })();
+
 
 
 
