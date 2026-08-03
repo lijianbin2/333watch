@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 333 Watcher - Add Monitor 页面逻辑 (v0.5.2)
  *
  * 监控类型：
@@ -491,6 +491,7 @@ async function addMonitor(data) {
     attribute: data.type === 'element' ? attribute : '',
     lastValue: data.type === 'element' ? attributeValue(pickedElement, attribute) : '',
     createdAt: new Date().toISOString(),
+    updatedAt: Date.now(),
     lastHash: '',
     lastCheck: '',
     lastCheckTime: 0,
@@ -585,8 +586,17 @@ function typeLabel(m) {
   return '整个网页';
 }
 
+function monitorUpdatedAt(m) {
+  if (typeof m.updatedAt === 'number') return m.updatedAt;
+  if (typeof m.createdAt === 'string') {
+    const t = new Date(m.createdAt).getTime();
+    if (!isNaN(t)) return t;
+  }
+  return 0;
+}
+
 async function renderList() {
-  const monitors = await getMonitors();
+  const monitors = (await getMonitors()).slice().sort((a, b) => monitorUpdatedAt(b) - monitorUpdatedAt(a));
   countEl.textContent = monitors.length;
 
   listEl.innerHTML = '';
