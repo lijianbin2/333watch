@@ -8,6 +8,7 @@
 </head>
 <body>
   <div class="container">
+    <!-- 标题 -->
     <header class="header">
       <div class="logo-dot"></div>
       <h1 class="title">333 Watcher</h1>
@@ -15,11 +16,29 @@
       <span id="sync-badge" class="sync-badge">Chrome 同步：已启用</span>
     </header>
 
+    <!-- 未读通知卡片（顶部） -->
+    <section id="notify-card" class="notify-card">
+      <button type="button" id="history-toggle" class="notify-card-header">
+        <span class="notify-card-title">
+          <span id="notify-dot" class="notify-dot hidden"></span>
+          通知历史
+          <span id="notify-summary" class="notify-summary">暂无通知</span>
+        </span>
+        <span class="notify-card-actions">
+          <span id="mark-all-read-btn" class="mark-all-read hidden">全部已读</span>
+          <span id="history-arrow" class="history-arrow">▸</span>
+        </span>
+      </button>
+      <ul id="history-list" class="history-list hidden"></ul>
+    </section>
+
+    <!-- 编辑状态横幅 -->
     <div id="editing-banner" class="editing-banner hidden">
       <span>正在编辑</span>
       <button type="button" id="cancel-edit-btn" class="btn-ghost-small">取消编辑</button>
     </div>
 
+    <!-- 添加监控 -->
     <form id="monitor-form" class="add-form">
       <label class="field">
         <span class="field-label">监控类型</span>
@@ -66,18 +85,17 @@
       </div>
     </div>
 
+    <!-- 已保存监控列表 -->
     <section class="monitor-section">
       <p class="section-label">已保存的监控（<span id="monitor-count">0</span>）</p>
       <ul id="monitor-list" class="watcher-list"></ul>
     </section>
 
-    <section class="history-section">
-      <button type="button" id="history-toggle" class="history-toggle">
-        <span>通知历史 <span id="history-count" class="history-count"></span></span>
-        <span id="history-arrow" class="history-arrow">▸</span>
-      </button>
-      <ul id="history-list" class="history-list hidden"></ul>
-    </section>
+    <!-- 设置 / 关于 -->
+    <footer class="footer">
+      <span class="footer-version">333 Watcher v0.2</span>
+      <a id="about-link" class="footer-link" href="https://github.com/lijianbin2/333watch">GitHub</a>
+    </footer>
   </div>
 
   <script src="add-monitor.js"></script>

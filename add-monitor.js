@@ -40,9 +40,12 @@ const elementSection = document.getElementById('element-section');
 const pickElementBtn = document.getElementById('pick-element-btn');
 const pickedInfo = document.getElementById('picked-info');
 
+const notifyCard = document.getElementById('notify-card');
+const notifyDot = document.getElementById('notify-dot');
+const notifySummary = document.getElementById('notify-summary');
+const markAllReadBtn = document.getElementById('mark-all-read-btn');
 const historyToggle = document.getElementById('history-toggle');
 const historyList = document.getElementById('history-list');
-const historyCount = document.getElementById('history-count');
 const historyArrow = document.getElementById('history-arrow');
 
 const hasChromeStorage = typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync;
@@ -118,10 +121,23 @@ async function saveHistory(history) {
 async function renderUnread() {
   const history = await getHistory();
   const unread = history.filter((h) => !h.read).length;
+
+  // 头部未读徽标
   unreadBadge.textContent = unread;
   unreadBadge.classList.toggle('hidden', unread === 0);
   unreadBadge.title = unread > 0 ? unread + ' 条未读提醒' : '';
-  historyCount.textContent = history.length > 0 ? '(' + history.length + ')' : '';
+
+  // 通知卡片：醒目标识 + 摘要
+  notifyDot.classList.toggle('hidden', unread === 0);
+  notifyCard.classList.toggle('has-unread', unread > 0);
+  markAllReadBtn.classList.toggle('hidden', unread === 0);
+  if (unread > 0) {
+    notifySummary.textContent = unread + ' 条未读';
+  } else if (history.length > 0) {
+    notifySummary.textContent = '共 ' + history.length + ' 条，全部已读';
+  } else {
+    notifySummary.textContent = '暂无通知';
+  }
 }
 
 // ---- 通知历史展开 / 标记已读 ----
@@ -131,9 +147,23 @@ historyToggle.addEventListener('click', async () => {
   historyArrow.textContent = historyExpanded ? '▾' : '▸';
   if (historyExpanded) {
     await renderHistoryList();
-    await markAllHistoryRead();
   }
 });
+
+markAllReadBtn.addEventListener('click', async (e) => {
+  e.stopPropagation(); // 避免触发卡片展开/收起
+  await markAllHistoryRead();
+  if (historyExpanded) await renderHistoryList();
+});
+
+async function markHistoryItemRead(id) {
+  const history = await getHistory();
+  const item = history.find((h) => h.id === id);
+  if (!item || item.read) return;
+  item.read = true;
+  await saveHistory(history);
+  renderUnread();
+}
 
 async function markAllHistoryRead() {
   const history = await getHistory();
@@ -177,11 +207,12 @@ async function renderHistoryList() {
     time.textContent = formatTime(h.time);
     li.appendChild(time);
 
-    if (h.url) {
-      li.classList.add('clickable');
-      li.title = '点击打开 ' + h.url;
-      li.addEventListener('click', () => openUrl(h.url));
-    }
+    li.classList.add('clickable');
+    li.title = h.url ? '点击打开 ' + h.url : '点击标记已读';
+    li.addEventListener('click', async () => {
+      await markHistoryItemRead(h.id);
+      if (h.url) openUrl(h.url);
+    });
     historyList.appendChild(li);
   }
 }
@@ -814,4 +845,5 @@ if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged)
     fillFromActiveTab();
   }
 })();
+
 

@@ -554,3 +554,108 @@ body {
   color: #8b949e;
   text-align: center;
 }
+
+/* ===== 通知卡片（顶部） ===== */
+.notify-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #161b22;
+  border: 1px solid #21262d;
+  border-radius: 10px;
+  padding: 10px 12px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+/* 有未读时的醒目标识 */
+.notify-card.has-unread {
+  border-color: rgba(47, 129, 247, 0.6);
+  box-shadow: 0 0 12px rgba(31, 111, 235, 0.25);
+}
+
+.notify-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0;
+  font-size: 13px;
+  color: #e6edf3;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+.notify-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.notify-summary {
+  font-size: 11px;
+  font-weight: 400;
+  color: #8b949e;
+}
+
+.notify-card.has-unread .notify-summary {
+  color: #58a6ff;
+}
+
+.notify-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 未读呼吸圆点 */
+.notify-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #2f81f7;
+  box-shadow: 0 0 6px rgba(47, 129, 247, 0.9);
+  animation: notify-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes notify-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.8); }
+}
+
+.mark-all-read {
+  font-size: 11px;
+  color: #58a6ff;
+  cursor: pointer;
+}
+
+.mark-all-read:hover {
+  color: #79c0ff;
+  text-decoration: underline;
+}
+
+/* ===== 页脚（设置/关于） ===== */
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 4px;
+  border-top: 1px solid #21262d;
+}
+
+.footer-version {
+  font-size: 11px;
+  color: #8b949e;
+}
+
+.footer-link {
+  font-size: 11px;
+  color: #58a6ff;
+  text-decoration: none;
+}
+
+.footer-link:hover {
+  color: #79c0ff;
+  text-decoration: underline;
+}
