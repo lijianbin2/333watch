@@ -7,6 +7,9 @@
  * - element：网页元素监控（offscreen document 解析 HTML + querySelector）
  */
 
+const DEBUG = false; // 发布版关闭信息日志，调试时改为 true
+function dbg(...args) { if (DEBUG) console.log(...args); }
+
 const ALARM_PREFIX = 'monitor-';
 
 // ---------------- 工具 ----------------
@@ -78,7 +81,7 @@ async function migrateData() {
       }
     }
     await chrome.storage.sync.remove('watchers');
-    console.log('[333 Watcher] migrated legacy watchers -> monitors');
+    dbg('[333 Watcher] migrated legacy watchers -> monitors');
   }
 
   const normalized = monitors.map((m) => ({
@@ -101,7 +104,7 @@ async function migrateData() {
 
   if (migrated || JSON.stringify(normalized) !== JSON.stringify(monitors)) {
     await saveMonitors(normalized);
-    console.log('[333 Watcher] data migration done,', normalized.length, 'monitor(s)');
+    dbg('[333 Watcher] data migration done,', normalized.length, 'monitor(s)');
   }
 }
 
@@ -128,14 +131,14 @@ async function syncAlarms() {
         delayInMinutes: Math.min(delayMin, period),
         periodInMinutes: period
       });
-      console.log('[333 Watcher] Alarm scheduled:', name, 'every', period, 'min');
+      dbg('[333 Watcher] Alarm scheduled:', name, 'every', period, 'min');
     }
   }
 
   for (const a of alarms) {
     if (a.name.startsWith(ALARM_PREFIX) && !wanted.has(a.name)) {
       await chrome.alarms.clear(a.name);
-      console.log('[333 Watcher] Alarm removed:', a.name);
+      dbg('[333 Watcher] Alarm removed:', a.name);
     }
   }
 }
@@ -182,14 +185,14 @@ async function checkPage(monitor, html) {
   const newHash = simpleHash(html);
   const oldHash = monitor.lastHash || null;
   const changed = oldHash !== null && newHash !== oldHash;
-  console.log('[333 Watcher] [page] oldHash:', oldHash, 'newHash:', newHash, 'changed:', changed);
+  dbg('[333 Watcher] [page] oldHash:', oldHash, 'newHash:', newHash, 'changed:', changed);
   return { changed, update: { lastHash: newHash } };
 }
 
 // ---------------- 检测：link（旧版，兼容保留） ----------------
 async function checkLink(monitor, html) {
   const links = extractLinks(html, monitor.url);
-  console.log('[333 Watcher] [link] extracted', links.length, 'links');
+  dbg('[333 Watcher] [link] extracted', links.length, 'links');
 
   let target = null;
   if (monitor.targetText) {
@@ -207,7 +210,7 @@ async function checkLink(monitor, html) {
   const currentHref = target.href;
   const lastValue = monitor.lastValue || null;
   const changed = lastValue !== null && currentHref !== lastValue;
-  console.log('[333 Watcher] [link] lastValue:', lastValue, 'currentHref:', currentHref, 'changed:', changed);
+  dbg('[333 Watcher] [link] lastValue:', lastValue, 'currentHref:', currentHref, 'changed:', changed);
   return { changed, update: { lastValue: currentHref } };
 }
 
@@ -230,21 +233,21 @@ async function checkElement(monitor, html) {
 
   const lastValue = monitor.lastValue || null;
   const changed = lastValue !== null && current !== lastValue;
-  console.log('[333 Watcher] [element] selector:', monitor.selector);
-  console.log('[333 Watcher] [element] attribute:', attribute);
-  console.log('[333 Watcher] [element] lastValue:', lastValue);
-  console.log('[333 Watcher] [element] current:', current);
-  console.log('[333 Watcher] [element] changed:', changed);
+  dbg('[333 Watcher] [element] selector:', monitor.selector);
+  dbg('[333 Watcher] [element] attribute:', attribute);
+  dbg('[333 Watcher] [element] lastValue:', lastValue);
+  dbg('[333 Watcher] [element] current:', current);
+  dbg('[333 Watcher] [element] changed:', changed);
   return { changed, update: { lastValue: current } };
 }
 
 // ---------------- 检测主流程 ----------------
 async function checkMonitor(monitor) {
   const checkedAt = new Date().toISOString();
-  console.log('[333 Watcher] ---- check start ----');
-  console.log('[333 Watcher] time:', checkedAt);
-  console.log('[333 Watcher] type:', monitor.type || 'page');
-  console.log('[333 Watcher] url:', monitor.url);
+  dbg('[333 Watcher] ---- check start ----');
+  dbg('[333 Watcher] time:', checkedAt);
+  dbg('[333 Watcher] type:', monitor.type || 'page');
+  dbg('[333 Watcher] url:', monitor.url);
 
   let html;
   try {
@@ -300,14 +303,14 @@ function sendNotification(notifId, title, message) {
       message: message,
       priority: 2
     };
-    console.log('[333 Watcher] notifications.create ->', notifId, JSON.stringify(options));
+    dbg('[333 Watcher] notifications.create ->', notifId, JSON.stringify(options));
 
     chrome.notifications.create(notifId, options, (notificationId) => {
       if (chrome.runtime.lastError) {
         console.error('[333 Watcher] notification FAILED. lastError:', chrome.runtime.lastError.message);
         resolve({ ok: false, notificationId: null, error: chrome.runtime.lastError.message });
       } else {
-        console.log('[333 Watcher] notification created OK, notificationId:', notificationId);
+        dbg('[333 Watcher] notification created OK, notificationId:', notificationId);
         resolve({ ok: true, notificationId: notificationId, error: null });
       }
     });
@@ -401,7 +404,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // ---------------- 事件入口 ----------------
 chrome.runtime.onInstalled.addListener(async (details) => {
-  console.log('[333 Watcher] installed:', details.reason);
+  dbg('[333 Watcher] installed:', details.reason);
   const data = await chrome.storage.sync.get('monitors');
   if (!Array.isArray(data.monitors)) {
     await chrome.storage.sync.set({ monitors: [] });
@@ -411,7 +414,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 });
 
 chrome.runtime.onStartup.addListener(async () => {
-  console.log('[333 Watcher] startup');
+  dbg('[333 Watcher] startup');
   await migrateData();
   await syncAlarms();
 });
@@ -432,7 +435,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-console.log('[333 Watcher] Background service worker loaded (v0.5)');
+dbg('[333 Watcher] Background service worker loaded (v0.5)');
 
 
 
@@ -456,7 +459,7 @@ async function addHistory(record) {
     read: false
   });
   await chrome.storage.local.set({ [HISTORY_KEY]: history.slice(0, HISTORY_LIMIT) });
-  console.log('[333 Watcher] history added:', record.message);
+  dbg('[333 Watcher] history added:', record.message);
 }
 
 async function updateBadge() {
@@ -485,7 +488,7 @@ async function catchUpChecks() {
   for (const m of monitors) {
     const next = Number(m.nextCheckTime) || 0;
     if (next <= now) {
-      console.log('[333 Watcher] catch-up check (overdue):', m.url);
+      dbg('[333 Watcher] catch-up check (overdue):', m.url);
       await checkMonitor(m);
     }
   }
@@ -494,3 +497,4 @@ async function catchUpChecks() {
 chrome.runtime.onStartup.addListener(async () => {
   await catchUpChecks();
 });
+

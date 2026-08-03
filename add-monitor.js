@@ -10,6 +10,9 @@
  *      未读徽标 / 通知历史（chrome.storage.local）/ 点击名称打开网址
  */
 
+const DEBUG = false; // 发布版关闭信息日志
+function dbg(...args) { if (DEBUG) console.log(...args); }
+
 const form = document.getElementById('monitor-form');
 const inputType = document.getElementById('input-type');
 const inputName = document.getElementById('input-name');
@@ -264,7 +267,7 @@ async function loadPendingPick() {
     inputName.value = pendingPick.pageTitle || pendingPick.text || '';
     syncTypeSections();
     showPickedInfo(pendingPick);
-    console.log('[333 Watcher] pendingPick loaded:', pendingPick.selector);
+    dbg('[333 Watcher] pendingPick loaded:', pendingPick.selector);
     return true;
   } catch (err) {
     console.error('[333 Watcher] load pendingPick failed:', err);
@@ -501,7 +504,7 @@ form.addEventListener('submit', async (e) => {
     }
     monitors[idx] = updated;
     await saveMonitors(monitors);
-    console.log('[333 Watcher] Monitor updated:', updated);
+    dbg('[333 Watcher] Monitor updated:', updated);
     const wasEdit = true;
     exitEditMode();
     if (wasEdit && data.type === 'element') await clearPendingPick();
@@ -555,7 +558,7 @@ async function addMonitor(data) {
   };
   monitors.push(monitor);
   await saveMonitors(monitors);
-  console.log('[333 Watcher] Monitor added:', monitor);
+  dbg('[333 Watcher] Monitor added:', monitor);
   await clearPendingPick();
   showStatus('已保存 ✓', false);
   form.reset();
@@ -623,7 +626,7 @@ confirmOverwriteBtn.addEventListener('click', async () => {
     }
     monitors[idx] = updated;
     await saveMonitors(monitors);
-    console.log('[333 Watcher] Monitor overwritten:', updated);
+    dbg('[333 Watcher] Monitor overwritten:', updated);
   }
   await clearPendingPick();
   showStatus('已覆盖保存 ✓', false);
@@ -811,3 +814,4 @@ if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged)
     fillFromActiveTab();
   }
 })();
+

@@ -12,6 +12,8 @@
 (function () {
   if (window.__w333PickerActive) return;
   window.__w333PickerActive = true;
+  const DEBUG = false;
+  function dbg(...args) { if (DEBUG) console.log(...args); }
 
   // 高亮框
   const overlay = document.createElement('div');
@@ -113,5 +115,6 @@
   document.addEventListener('click', onClick, true);
   document.addEventListener('keydown', onKey, true);
 
-  console.log('[333 Watcher] picker activated');
+  dbg('[333 Watcher] picker activated');
 })();
+
