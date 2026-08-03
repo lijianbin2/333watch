@@ -218,6 +218,16 @@ function openUrl(url) {
   }
 }
 
+async function closePagePicker() {
+  if (!hasTabsApi) return;
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab && tab.id) {
+      await chrome.tabs.sendMessage(tab.id, { type: 'w333-close-dialog' });
+    }
+  } catch {}
+}
+
 // ---- 页脚版本号 ----
 (function renderFooterVersion() {
   const el = document.getElementById('footer-version');
@@ -445,6 +455,7 @@ form.addEventListener('submit', async (e) => {
     updated.targetText = '';
     monitors[idx] = updated;
     await saveMonitors(monitors);
+    await closePagePicker();
     dbg('[333 Watcher] Monitor updated:', updated);
     exitEditMode();
     await clearPendingPick();
@@ -499,6 +510,7 @@ async function addMonitor(data) {
   };
   monitors.push(monitor);
   await saveMonitors(monitors);
+  await closePagePicker();
   dbg('[333 Watcher] Monitor added:', monitor);
   await clearPendingPick();
   showStatus('已保存 ✓', false);
@@ -559,6 +571,7 @@ confirmOverwriteBtn.addEventListener('click', async () => {
     updated.lastHash = '';
     monitors[idx] = updated;
     await saveMonitors(monitors);
+    await closePagePicker();
     dbg('[333 Watcher] Monitor overwritten:', updated);
   }
   await clearPendingPick();

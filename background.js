@@ -58,6 +58,73 @@ async function saveMonitors(monitors) {
   await chrome.storage.sync.set({ monitors });
 }
 
+async function savePickedMonitor(pick, attribute) {
+  if (!pick || !pick.selector) {
+    return { ok: false, error: '未获取到元素信息，请重新选择' };
+  }
+  const url = normalizeUrl(pick.pageUrl || '');
+  if (!url) {
+    return { ok: false, error: '无法获取当前网页地址' };
+  }
+  const attr = ['text', 'href', 'src'].includes(attribute) ? attribute : 'text';
+  const name = (String(pick.text || pick.pageTitle || '指定内容').trim().slice(0, 60)) || '指定内容';
+  const monitors = await getMonitors();
+  const idx = monitors.findIndex((m) =>
+    normalizeUrl(m.url || '') === url &&
+    (m.type || 'page') === 'element' &&
+    (m.selector || '') === pick.selector
+  );
+
+  const lastValue = attributeValueOfPick(pick, attr);
+
+  if (idx !== -1) {
+    const old = monitors[idx];
+    monitors[idx] = {
+      ...old,
+      name: name,
+      url: url,
+      type: 'element',
+      selector: pick.selector,
+      attribute: attr,
+      lastValue: lastValue,
+      lastHash: '',
+      targetHref: '',
+      targetText: '',
+      updatedAt: Date.now()
+    };
+    await saveMonitors(monitors);
+    dbg('[333 Watcher] picked monitor updated:', monitors[idx].id);
+    return { ok: true, mode: 'updated', id: old.id };
+  }
+
+  const monitor = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    name: name,
+    url: url,
+    interval: 1000,
+    type: 'element',
+    selector: pick.selector,
+    attribute: attr,
+    lastValue: lastValue,
+    createdAt: new Date().toISOString(),
+    updatedAt: Date.now(),
+    lastHash: '',
+    lastCheck: '',
+    lastCheckTime: 0,
+    nextCheckTime: 0
+  };
+  monitors.push(monitor);
+  await saveMonitors(monitors);
+  dbg('[333 Watcher] picked monitor added:', monitor.id);
+  return { ok: true, mode: 'added', id: monitor.id };
+}
+
+function attributeValueOfPick(pick, attr) {
+  if (attr === 'href') return pick.href || '';
+  if (attr === 'src') return pick.src || '';
+  return pick.text || '';
+}
+
 // ---------------- 数据迁移 ----------------
 async function migrateData() {
   const data = await chrome.storage.sync.get(null);
@@ -409,14 +476,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // 元素选择完成（来自 picker.js）
-  if (msg.type === 'element-picked') {
-    sendNotification(
-      'notif-picked-' + Date.now(),
-      '333 Watcher',
-      '元素已选择，点击扩展图标完成保存'
-    );
-    return;
+  // 元素点选后直接在页面内保存（来自 picker.js 浮层）
+  if (msg.type === 'save-element-monitor') {
+    (async () => {
+      try {
+        const result = await savePickedMonitor(msg.pick, msg.attribute);
+        sendResponse(result);
+      } catch (err) {
+        console.error('[333 Watcher] save picked monitor failed:', err);
+        sendResponse({ ok: false, error: err.message || '保存失败' });
+      }
+    })();
+    return true;
   }
 });
 
