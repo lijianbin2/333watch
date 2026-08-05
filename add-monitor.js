@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.5.2)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.5.3)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
