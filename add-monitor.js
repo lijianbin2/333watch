@@ -111,8 +111,25 @@ async function saveHistory(history) {
   }
 }
 
+// 清理已读通知：超过保留期后自动删除，避免历史无限累积
+const HISTORY_READ_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+async function pruneHistory() {
+  const history = await getHistory();
+  if (!history.length) return;
+  const cutoff = Date.now() - HISTORY_READ_RETENTION_MS;
+  const kept = history.filter((h) => {
+    if (!h.read) return true;
+    const readAt = Number(h.readAt) || new Date(h.time).getTime() || 0;
+    return readAt >= cutoff;
+  });
+  if (kept.length !== history.length) {
+    await saveHistory(kept);
+  }
+}
+
 // ---- 未读数显示 ----
 async function renderUnread() {
+  await pruneHistory();
   const history = await getHistory();
   const unread = history.filter((h) => !h.read).length;
 
@@ -153,6 +170,7 @@ async function markHistoryItemRead(id) {
   const item = history.find((h) => h.id === id);
   if (!item || item.read) return;
   item.read = true;
+  item.readAt = Date.now();
   await saveHistory(history);
   renderUnread();
 }
@@ -160,7 +178,7 @@ async function markHistoryItemRead(id) {
 async function markAllHistoryRead() {
   const history = await getHistory();
   if (!history.some((h) => !h.read)) return;
-  await saveHistory(history.map((h) => ({ ...h, read: true })));
+  await saveHistory(history.map((h) => ({ ...h, read: true, readAt: Date.now() })));
   renderUnread();
 }
 

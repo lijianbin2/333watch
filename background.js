@@ -531,6 +531,7 @@ dbg('[333 Watcher] Background service worker loaded (v0.5)');
 // ================= 通知历史 + 角标（chrome.storage.local） =================
 const HISTORY_KEY = 'history';
 const HISTORY_LIMIT = 100;
+const HISTORY_READ_RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 已读通知保留 7 天后自动清理
 
 async function getHistory() {
   const data = await chrome.storage.local.get(HISTORY_KEY);
@@ -551,7 +552,24 @@ async function addHistory(record) {
   dbg('[333 Watcher] history added:', record.message);
 }
 
+// 清理已读通知：超过保留期后自动删除，避免历史无限累积
+async function pruneHistory() {
+  const history = await getHistory();
+  if (!history.length) return;
+  const cutoff = Date.now() - HISTORY_READ_RETENTION_MS;
+  const kept = history.filter((h) => {
+    if (!h.read) return true;
+    const readAt = Number(h.readAt) || new Date(h.time).getTime() || 0;
+    return readAt >= cutoff;
+  });
+  if (kept.length !== history.length) {
+    await chrome.storage.local.set({ [HISTORY_KEY]: kept });
+    dbg('[333 Watcher] history pruned:', history.length - kept.length, 'read item(s)');
+  }
+}
+
 async function updateBadge() {
+  await pruneHistory();
   const history = await getHistory();
   const unread = history.filter((h) => !h.read).length;
   await chrome.action.setBadgeBackgroundColor({ color: '#1f6feb' });
