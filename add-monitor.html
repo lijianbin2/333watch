@@ -87,8 +87,24 @@
       <ul id="monitor-list" class="watcher-list"></ul>
     </section>
 
+    <div id="migrate-bar" class="migrate-bar">
+      <div class="migrate-head">
+        <span class="migrate-title">数据迁移</span>
+        <span class="migrate-hint">本地版 ↔ 商店版互导</span>
+      </div>
+      <div class="migrate-actions">
+        <button type="button" id="export-btn" class="btn-ghost-small">导出设置</button>
+        <button type="button" id="import-toggle-btn" class="btn-ghost-small">导入设置</button>
+      </div>
+      <div id="import-box" class="import-box hidden">
+        <textarea id="import-area" class="import-area" rows="4" placeholder="把另一版本的导出内容粘贴到这里"></textarea>
+        <button type="button" id="import-confirm-btn" class="btn-primary">确认导入</button>
+      </div>
+      <p id="migrate-status" class="migrate-status hidden"></p>
+    </div>
+
     <footer class="footer">
-      <span id="footer-version" class="footer-version">333 Watcher v0.5.4</span>
+      <span id="footer-version" class="footer-version">333 Watcher v0.5.5</span>
       <a id="about-link" class="footer-link" href="https://github.com/lijianbin2/333watch">GitHub</a>
     </footer>
   </div>

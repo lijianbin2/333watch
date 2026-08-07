@@ -1,7 +1,7 @@
 ﻿{
   "manifest_version": 3,
   "name": "333 Watcher",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "Monitor website changes and notify updates",
   "action": {
     "default_popup": "add-monitor.html",

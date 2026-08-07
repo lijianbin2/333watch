@@ -659,3 +659,59 @@ body {
   color: #79c0ff;
   text-decoration: underline;
 }
+/* ===== 数据迁移 ===== */
+.migrate-bar {
+  margin: 10px 0 2px;
+  padding: 10px 12px;
+  border: 1px solid #21262d;
+  border-radius: 8px;
+  background: #0d1117;
+}
+.migrate-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.migrate-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #e6edf3;
+}
+.migrate-hint {
+  font-size: 10px;
+  color: #8b949e;
+}
+.migrate-actions {
+  display: flex;
+  gap: 8px;
+}
+.import-box {
+  margin-top: 8px;
+}
+.import-area {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  margin-bottom: 8px;
+  padding: 8px;
+  font: 11px/1.5 Consolas, monospace;
+  color: #e6edf3;
+  background: #010409;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+}
+.import-area:focus {
+  outline: none;
+  border-color: #1f6feb;
+}
+.migrate-status {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #7ee787;
+}
+.migrate-status.error {
+  color: #f85149;
+}
+

@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.5.4)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.5.5)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -782,6 +782,90 @@ if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged)
     }
   });
 }
+
+// ---- 数据迁移：导出 / 导入（本地版 ↔ 商店版） ----
+const exportBtn = document.getElementById('export-btn');
+const importToggleBtn = document.getElementById('import-toggle-btn');
+const importBox = document.getElementById('import-box');
+const importArea = document.getElementById('import-area');
+const importConfirmBtn = document.getElementById('import-confirm-btn');
+const migrateStatus = document.getElementById('migrate-status');
+
+function showMigrateStatus(text, isError) {
+  migrateStatus.textContent = text;
+  migrateStatus.classList.remove('hidden');
+  migrateStatus.classList.toggle('error', !!isError);
+}
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {}
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch { return false; }
+}
+
+exportBtn.addEventListener('click', async () => {
+  try {
+    const monitors = await getMonitors();
+    const payload = JSON.stringify({
+      app: '333-watcher',
+      exportedAt: new Date().toISOString(),
+      monitors: monitors
+    }, null, 2);
+    const ok = await copyText(payload);
+    if (ok) {
+      showMigrateStatus('已复制导出内容，请到另一个版本点击「导入设置」粘贴后导入');
+    } else {
+      console.log('[333 Watcher] 导出数据:', payload);
+      showMigrateStatus('复制失败，请从控制台复制导出的 JSON', true);
+    }
+  } catch (err) {
+    showMigrateStatus('导出失败：' + err.message, true);
+  }
+});
+
+importToggleBtn.addEventListener('click', () => {
+  const willShow = importBox.classList.contains('hidden');
+  importBox.classList.toggle('hidden', !willShow);
+  if (willShow) importArea.focus();
+});
+
+importConfirmBtn.addEventListener('click', async () => {
+  try {
+    const data = JSON.parse(importArea.value.trim());
+    if (!data || !Array.isArray(data.monitors)) {
+      throw new Error('格式不正确，请粘贴完整的导出内容');
+    }
+    const imported = data.monitors;
+    const current = await getMonitors();
+    const map = new Map(current.map((m) => [normalizeUrl(m.url || ''), m]));
+    let added = 0;
+    for (const m of imported) {
+      const key = normalizeUrl(m.url || '');
+      if (!key) continue;
+      if (!map.has(key)) added++;
+      map.set(key, m);
+    }
+    await saveMonitors([...map.values()]);
+    renderList();
+    showMigrateStatus('导入成功：共 ' + imported.length + ' 条，新增 ' + added + ' 条');
+  } catch (err) {
+    showMigrateStatus('导入失败：' + err.message, true);
+  }
+});
 
 // ---- 初始化 ----
 (async function init() {
