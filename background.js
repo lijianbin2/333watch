@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.5.3)
+ * 333 Watcher - Background Service Worker (v0.5.4)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -69,11 +69,8 @@ async function savePickedMonitor(pick, attribute) {
   const attr = ['text', 'href', 'src'].includes(attribute) ? attribute : 'text';
   const name = (String(pick.text || pick.pageTitle || '指定内容').trim().slice(0, 60)) || '指定内容';
   const monitors = await getMonitors();
-  const idx = monitors.findIndex((m) =>
-    normalizeUrl(m.url || '') === url &&
-    (m.type || 'page') === 'element' &&
-    (m.selector || '') === pick.selector
-  );
+  // 同一网址只允许一个监控（避免重复通知），已有则更新
+  const idx = monitors.findIndex((m) => normalizeUrl(m.url || '') === url);
 
   const lastValue = attributeValueOfPick(pick, attr);
 
@@ -176,6 +173,7 @@ async function migrateData() {
       targetText: m.targetText || '',
       lastValue: m.lastValue || '',
       createdAt: m.createdAt || new Date().toISOString(),
+      updatedAt: m.updatedAt || 0,
       lastHash: m.lastHash || '',
       lastCheck: m.lastCheck || '',
       lastCheckTime: m.lastCheckTime || 0,
@@ -183,9 +181,23 @@ async function migrateData() {
     };
   });
 
-  if (migrated || JSON.stringify(normalized) !== JSON.stringify(monitors)) {
-    await saveMonitors(normalized);
-    dbg('[333 Watcher] data migration done,', normalized.length, 'monitor(s)');
+  // 去重：同一网址只保留一个监控（保留 updatedAt 最新的），避免重复通知
+  const urlLatest = new Map();
+  for (const m of normalized) {
+    const key = normalizeUrl(m.url);
+    if (!key) continue;
+    const prev = urlLatest.get(key);
+    const timeOf = (x) => Number(x.updatedAt) || new Date(x.createdAt).getTime() || 0;
+    if (!prev || timeOf(m) > timeOf(prev)) urlLatest.set(key, m);
+  }
+  const deduped = normalized.filter((m) => {
+    const key = normalizeUrl(m.url);
+    return !!key && urlLatest.get(key) === m;
+  });
+
+  if (migrated || JSON.stringify(deduped) !== JSON.stringify(monitors)) {
+    await saveMonitors(deduped);
+    dbg('[333 Watcher] data migration done,', deduped.length, 'monitor(s)');
   }
 }
 
@@ -329,6 +341,13 @@ async function checkMonitor(monitor) {
   dbg('[333 Watcher] time:', checkedAt);
   dbg('[333 Watcher] type:', monitor.type || 'page');
   dbg('[333 Watcher] url:', monitor.url);
+
+  // 硬校验：监控已被删除则直接跳过，避免删除后仍检查/通知
+  const alive = await getMonitors();
+  if (!alive.some((m) => m.id === monitor.id)) {
+    dbg('[333 Watcher] monitor deleted, check skipped:', monitor.id);
+    return 'deleted';
+  }
 
   let html;
   try {
@@ -510,7 +529,7 @@ chrome.runtime.onStartup.addListener(async () => {
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'sync' && changes.monitors) {
-    syncAlarms();
+    syncAlarms().catch((err) => console.error('[333 Watcher] syncAlarms failed:', err));
   }
 });
 
@@ -524,7 +543,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-dbg('[333 Watcher] Background service worker loaded (v0.5.3)');
+dbg('[333 Watcher] Background service worker loaded (v0.5.4)');
 
 
 

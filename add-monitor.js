@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.5.3)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.5.4)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -52,6 +52,8 @@ let historyExpanded = false;
 
 const DEBUG = false; // 发布版关闭信息日志，调试时改为 true
 function dbg(...args) { if (DEBUG) console.log(...args); }
+
+const ALARM_PREFIX = 'monitor-'; // 与 background.js 保持一致，删除监控时清理 alarm
 
 // ---- 同步状态显示 ----
 function renderSyncBadge() {
@@ -482,16 +484,8 @@ form.addEventListener('submit', async (e) => {
     return;
   }
 
-  // 新增模式：重复检测
-  // page: 同 URL；element: 同 URL + 同 selector
-  const existing = monitors.find((m) => {
-    if (normalizeUrl(m.url || '') !== data.url) return false;
-    if ((m.type || 'page') !== data.type) return false;
-    if (data.type === 'element') {
-      return pickedElement && (m.selector || '') === pickedElement.selector;
-    }
-    return true;
-  });
+  // 新增模式：重复检测（同一网址只允许一个监控，避免重复通知）
+  const existing = monitors.find((m) => normalizeUrl(m.url || '') === data.url);
   if (existing) {
     showOverwriteConfirm(existing, data);
     return;
@@ -751,7 +745,20 @@ testNotifyBtn.addEventListener('click', async () => {
 
 async function removeMonitor(id) {
   const monitors = await getMonitors();
-  await saveMonitors(monitors.filter((m) => m.id !== id));
+  const target = monitors.find((m) => m.id === id);
+  const url = target ? normalizeUrl(target.url || '') : '';
+  // 同一网址的所有监控一起删除，避免残留监控继续发通知
+  const kept = url
+    ? monitors.filter((m) => normalizeUrl(m.url || '') !== url)
+    : monitors.filter((m) => m.id !== id);
+  await saveMonitors(kept);
+  // 立即清除对应 alarm，防止删除后仍被调度检查
+  if (typeof chrome !== 'undefined' && chrome.alarms) {
+    const removed = monitors.filter((m) => !kept.includes(m));
+    for (const m of removed) {
+      try { await chrome.alarms.clear(ALARM_PREFIX + m.id); } catch {}
+    }
+  }
   if (editingId === id) exitEditMode();
   renderList();
 }
