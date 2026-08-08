@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.5.5)
+ * 333 Watcher - Background Service Worker (v0.5.6)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -304,13 +304,22 @@ async function checkLink(monitor, html) {
   const lastValue = monitor.lastValue || null;
   const changed = lastValue !== null && currentHref !== lastValue;
   dbg('[333 Watcher] [link] lastValue:', lastValue, 'currentHref:', currentHref, 'changed:', changed);
-  return { changed, update: { lastValue: currentHref } };
+  return { changed, prevValue: lastValue, update: { lastValue: currentHref } };
 }
 
 // ---------------- 检测：element ----------------
 async function checkElement(monitor, html) {
   const attribute = monitor.attribute || 'text';
   const resp = await queryElementValue(html, monitor.selector, attribute);
+
+  if ((!resp || !resp.ok) && attribute === 'href' && monitor.lastValue) {
+    // 选择器失效自愈：网站改版后元素 id 可能变化，按上次记录的 href 找回同一元素
+    const found = await findElementByValue(monitor.url, html, monitor.lastValue);
+    if (found && found.ok) {
+      dbg('[333 Watcher] [element] selector healed:', found.selector);
+      return { changed: false, update: { selector: found.selector }, healed: true };
+    }
+  }
 
   if (!resp || !resp.ok) {
     console.warn('[333 Watcher] [element] query failed:', resp && resp.error);
@@ -331,10 +340,71 @@ async function checkElement(monitor, html) {
   dbg('[333 Watcher] [element] lastValue:', lastValue);
   dbg('[333 Watcher] [element] current:', current);
   dbg('[333 Watcher] [element] changed:', changed);
-  return { changed, update: { lastValue: current } };
+  return { changed, prevValue: lastValue, update: { lastValue: current } };
 }
 
 // ---------------- 检测主流程 ----------------
+// ---------------- 选择器自愈 / 二次确认 ----------------
+async function findElementByValue(baseUrl, html, value) {
+  try {
+    await ensureOffscreen();
+    const resp = await chrome.runtime.sendMessage({
+      type: 'find-by-value',
+      html: html,
+      baseUrl: baseUrl,
+      value: value
+    });
+    chrome.offscreen.closeDocument().catch(() => {});
+    return resp;
+  } catch (err) {
+    console.warn('[333 Watcher] findElementByValue failed:', err.message);
+    return null;
+  }
+}
+
+async function getCurrentValue(monitor, html) {
+  if (monitor.type === 'element' && monitor.selector) {
+    const attribute = monitor.attribute || 'text';
+    const resp = await queryElementValue(html, monitor.selector, attribute);
+    if (!resp || !resp.ok) return { ok: false };
+    let v = resp.value;
+    if (attribute === 'href' && v) {
+      try { v = new URL(v, monitor.url).href; } catch {}
+    }
+    return { ok: true, value: v };
+  }
+  const links = extractLinks(html, monitor.url);
+  let target = null;
+  if (monitor.targetText) {
+    target = links.find((l) => l.text === monitor.targetText);
+  }
+  if (!target && monitor.targetHref) {
+    target = links.find((l) => normalizeUrl(l.href) === normalizeUrl(monitor.targetHref));
+  }
+  if (!target) return { ok: false };
+  return { ok: true, value: target.href };
+}
+
+// 变化二次确认：立即重新抓取一次页面，值仍为新值才判定为真实变化
+// 目的：避免 CDN/A-B 测试/缓存抖动造成的误报
+async function confirmChange(monitor, newValue) {
+  try {
+    const res = await fetch(monitor.url, { cache: 'no-store' });
+    const html = await res.text();
+    const cur = await getCurrentValue(monitor, html);
+    if (!cur.ok) {
+      dbg('[333 Watcher] confirm: element not found on re-fetch, keep notification');
+      return { stable: true, value: newValue };
+    }
+    const stable = cur.value === newValue;
+    dbg('[333 Watcher] confirm: first =', newValue, ' second =', cur.value, ' stable =', stable);
+    return { stable: stable, value: cur.value };
+  } catch (err) {
+    console.warn('[333 Watcher] confirm fetch failed:', err.message);
+    return { stable: true, value: newValue };
+  }
+}
+
 async function checkMonitor(monitor) {
   const checkedAt = new Date().toISOString();
   dbg('[333 Watcher] ---- check start ----');
@@ -391,7 +461,20 @@ async function checkMonitor(monitor) {
   await saveMonitors(monitors);
 
   if (outcome.changed) {
-    await notifyChange(monitors[idx]);
+    const isValueType = type === 'element' || type === 'link' || type === 'download';
+    if (isValueType) {
+      const confirmRes = await confirmChange(monitors[idx], outcome.update.lastValue);
+      if (!confirmRes.stable) {
+        dbg('[333 Watcher] value unstable between two fetches, notification suppressed');
+        monitors[idx] = { ...monitors[idx], lastValue: confirmRes.value };
+        await saveMonitors(monitors);
+        return 'flaky';
+      }
+    }
+    await notifyChange(monitors[idx], {
+      oldValue: outcome.prevValue,
+      newValue: outcome.update.lastValue
+    });
     return 'changed';
   }
   return 'unchanged';
@@ -421,12 +504,12 @@ function sendNotification(notifId, title, message) {
   });
 }
 
-async function notifyChange(monitor) {
+async function notifyChange(monitor, change) {
   const notifId = 'notif-' + monitor.id;
   const title = '333 Watcher';
   const name = monitor.name || monitor.url;
   let message;
-  if (monitor.type === 'link') {
+  if (monitor.type === 'link' || monitor.type === 'download') {
     message = '"' + name + '" 下载地址发生变化';
   } else if (monitor.type === 'element') {
     message = monitor.attribute === 'href'
@@ -434,6 +517,13 @@ async function notifyChange(monitor) {
       : '"' + name + '" 监控内容发生变化';
   } else {
     message = '"' + name + '" 页面发生变化';
+  }
+  if (change && change.newValue != null && (monitor.type || 'page') !== 'page') {
+    const fmt = (v) => {
+      const str = v == null || v === '' ? '(空)' : String(v);
+      return str.length > 60 ? str.slice(0, 57) + '...' : str;
+    };
+    message += '\n旧: ' + fmt(change.oldValue) + '\n新: ' + fmt(change.newValue);
   }
 
   const result = await sendNotification(notifId, title, message);
@@ -543,7 +633,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-dbg('[333 Watcher] Background service worker loaded (v0.5.5)');
+dbg('[333 Watcher] Background service worker loaded (v0.5.6)');
 
 
 
