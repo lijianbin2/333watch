@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.5.6)
+ * 333 Watcher - Background Service Worker (v0.5.7)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -530,7 +530,7 @@ async function notifyChange(monitor, change) {
   if (!result.ok) {
     console.error('[333 Watcher] 通知发送失败，error =', result.error);
   } else {
-    // 写入通知历史（chrome.storage.local）
+    // 写入通知历史（chrome.storage.sync，跨设备同步）
     await addHistory({
       name: monitor.name || monitor.url,
       url: monitor.url,
@@ -608,12 +608,14 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     await chrome.storage.sync.set({ monitors: [] });
   }
   await migrateData();
+  await migrateHistoryToSync();
   await syncAlarms();
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   dbg('[333 Watcher] startup');
   await migrateData();
+  await migrateHistoryToSync();
   await syncAlarms();
 });
 
@@ -633,47 +635,115 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-dbg('[333 Watcher] Background service worker loaded (v0.5.6)');
+dbg('[333 Watcher] Background service worker loaded (v0.5.7)');
 
 
 
-// ================= 通知历史 + 角标（chrome.storage.local） =================
+// ================= 通知历史 + 角标（chrome.storage.sync，跨设备同步） =================
 const HISTORY_KEY = 'history';
-const HISTORY_LIMIT = 100;
+const HISTORY_LIMIT = 50; // storage.sync 容量有限，只保留最近 50 条
+const HISTORY_MAX_BYTES = 7000; // storage.sync 单 key 上限 8KB，留出余量
 const HISTORY_READ_RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 已读通知保留 7 天后自动清理
 
+function utf8Bytes(str) {
+  return new TextEncoder().encode(str).length;
+}
+
 async function getHistory() {
-  const data = await chrome.storage.local.get(HISTORY_KEY);
+  const data = await chrome.storage.sync.get(HISTORY_KEY);
   return Array.isArray(data[HISTORY_KEY]) ? data[HISTORY_KEY] : [];
 }
 
+async function saveHistory(history) {
+  let list = Array.isArray(history) ? history : [];
+  list = list.slice(0, HISTORY_LIMIT);
+  // 超长时优先丢弃最旧记录，避免写入超过 storage.sync 的 8KB 单 key 限制
+  while (list.length > 1 && utf8Bytes(JSON.stringify(list)) > HISTORY_MAX_BYTES) {
+    list = list.slice(0, -1);
+  }
+  await chrome.storage.sync.set({ [HISTORY_KEY]: list });
+}
+
 async function addHistory(record) {
-  const history = await getHistory();
-  history.unshift({
-    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-    name: record.name,
-    url: record.url,
-    time: new Date().toISOString(),
-    message: record.message,
-    read: false
-  });
-  await chrome.storage.local.set({ [HISTORY_KEY]: history.slice(0, HISTORY_LIMIT) });
-  dbg('[333 Watcher] history added:', record.message);
+  try {
+    const history = await getHistory();
+    history.unshift({
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      name: record.name,
+      url: record.url,
+      time: new Date().toISOString(),
+      message: record.message,
+      read: false
+    });
+    await saveHistory(history);
+    dbg('[333 Watcher] history added:', record.message);
+  } catch (err) {
+    console.error('[333 Watcher] history add failed:', err);
+  }
 }
 
 // 清理已读通知：超过保留期后自动删除，避免历史无限累积
 async function pruneHistory() {
-  const history = await getHistory();
-  if (!history.length) return;
-  const cutoff = Date.now() - HISTORY_READ_RETENTION_MS;
-  const kept = history.filter((h) => {
-    if (!h.read) return true;
-    const readAt = Number(h.readAt) || new Date(h.time).getTime() || 0;
-    return readAt >= cutoff;
+  try {
+    const history = await getHistory();
+    if (!history.length) return;
+    const cutoff = Date.now() - HISTORY_READ_RETENTION_MS;
+    const kept = history.filter((h) => {
+      if (!h.read) return true;
+      const readAt = Number(h.readAt) || new Date(h.time).getTime() || 0;
+      return readAt >= cutoff;
+    });
+    if (kept.length !== history.length) {
+      await saveHistory(kept);
+      dbg('[333 Watcher] history pruned:', history.length - kept.length, 'read item(s)');
+    }
+  } catch (err) {
+    console.error('[333 Watcher] history prune failed:', err);
+  }
+}
+
+// 旧版本历史存在本机 storage.local，启动时一次性合并进 sync，保证换电脑后已读状态同步
+function mergeHistoryLists(...lists) {
+  const byKey = new Map();
+  for (const list of lists) {
+    for (const h of list) {
+      if (!h || typeof h !== 'object') continue;
+      const id = String(h.id || '');
+      const time = h.time || '';
+      const text = String(h.message || h.name || '');
+      const key = id || (time + '|' + text);
+      const prev = byKey.get(key);
+      if (!prev) {
+        byKey.set(key, { ...h });
+        continue;
+      }
+      const merged = { ...prev, ...h };
+      merged.read = !!(prev.read || h.read);
+      merged.readAt = h.readAt || prev.readAt || null;
+      byKey.set(key, merged);
+    }
+  }
+  return [...byKey.values()].sort((a, b) => {
+    const ta = new Date(a.time).getTime() || 0;
+    const tb = new Date(b.time).getTime() || 0;
+    return tb - ta;
   });
-  if (kept.length !== history.length) {
-    await chrome.storage.local.set({ [HISTORY_KEY]: kept });
-    dbg('[333 Watcher] history pruned:', history.length - kept.length, 'read item(s)');
+}
+
+async function migrateHistoryToSync() {
+  try {
+    const localData = await chrome.storage.local.get(HISTORY_KEY);
+    const localHistory = Array.isArray(localData[HISTORY_KEY]) ? localData[HISTORY_KEY] : [];
+    if (!localHistory.length) return;
+    const syncData = await chrome.storage.sync.get(HISTORY_KEY);
+    const syncHistory = Array.isArray(syncData[HISTORY_KEY]) ? syncData[HISTORY_KEY] : [];
+    const merged = mergeHistoryLists(syncHistory, localHistory);
+    if (!merged.length) return;
+    await saveHistory(merged);
+    await chrome.storage.local.remove(HISTORY_KEY);
+    dbg('[333 Watcher] history migrated local -> sync:', merged.length, 'item(s)');
+  } catch (err) {
+    console.error('[333 Watcher] history migration failed:', err);
   }
 }
 
@@ -687,7 +757,7 @@ async function updateBadge() {
 
 // 历史变化时自动刷新角标（含 popup 标记已读后的清零）
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && changes[HISTORY_KEY]) {
+  if (area === 'sync' && changes[HISTORY_KEY]) {
     updateBadge();
   }
 });

@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.5.6)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.5.7)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -41,7 +41,6 @@ const historyList = document.getElementById('history-list');
 const historyArrow = document.getElementById('history-arrow');
 
 const hasChromeStorage = typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync;
-const hasLocalStorage = typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local;
 const hasTabsApi = typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query;
 const hasScripting = typeof chrome !== 'undefined' && chrome.scripting && chrome.scripting.executeScript;
 
@@ -92,10 +91,17 @@ async function saveMonitors(monitors) {
   }
 }
 
-// ---- 通知历史存储层（chrome.storage.local） ----
+// ---- 通知历史存储层（chrome.storage.sync，跨设备同步） ----
+const HISTORY_LIMIT = 50;
+const HISTORY_MAX_BYTES = 7000; // storage.sync 单 key 上限 8KB，留出余量
+
+function utf8Bytes(str) {
+  return new TextEncoder().encode(str).length;
+}
+
 async function getHistory() {
-  if (hasLocalStorage) {
-    const { history = [] } = await chrome.storage.local.get('history');
+  if (hasChromeStorage) {
+    const { history = [] } = await chrome.storage.sync.get('history');
     return Array.isArray(history) ? history : [];
   }
   try {
@@ -106,26 +112,36 @@ async function getHistory() {
 }
 
 async function saveHistory(history) {
-  if (hasLocalStorage) {
-    await chrome.storage.local.set({ history });
+  let list = Array.isArray(history) ? history : [];
+  list = list.slice(0, HISTORY_LIMIT);
+  if (hasChromeStorage) {
+    // 超长时优先丢弃最旧记录，避免写入超过 storage.sync 的 8KB 单 key 限制
+    while (list.length > 1 && utf8Bytes(JSON.stringify(list)) > HISTORY_MAX_BYTES) {
+      list = list.slice(0, -1);
+    }
+    await chrome.storage.sync.set({ history: list });
   } else {
-    localStorage.setItem('history', JSON.stringify(history));
+    localStorage.setItem('history', JSON.stringify(list));
   }
 }
 
 // 清理已读通知：超过保留期后自动删除，避免历史无限累积
 const HISTORY_READ_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 async function pruneHistory() {
-  const history = await getHistory();
-  if (!history.length) return;
-  const cutoff = Date.now() - HISTORY_READ_RETENTION_MS;
-  const kept = history.filter((h) => {
-    if (!h.read) return true;
-    const readAt = Number(h.readAt) || new Date(h.time).getTime() || 0;
-    return readAt >= cutoff;
-  });
-  if (kept.length !== history.length) {
-    await saveHistory(kept);
+  try {
+    const history = await getHistory();
+    if (!history.length) return;
+    const cutoff = Date.now() - HISTORY_READ_RETENTION_MS;
+    const kept = history.filter((h) => {
+      if (!h.read) return true;
+      const readAt = Number(h.readAt) || new Date(h.time).getTime() || 0;
+      return readAt >= cutoff;
+    });
+    if (kept.length !== history.length) {
+      await saveHistory(kept);
+    }
+  } catch (err) {
+    console.error('[333 Watcher] history prune failed:', err);
   }
 }
 
@@ -777,7 +793,7 @@ function hideStatus() {
 // ---- 历史变化时实时刷新未读徽标 ----
 if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes.history) {
+    if (area === 'sync' && changes.history) {
       renderUnread();
     }
   });
