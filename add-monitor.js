@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.5.7)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.1)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -39,10 +39,12 @@ const markAllReadBtn = document.getElementById('mark-all-read-btn');
 const historyToggle = document.getElementById('history-toggle');
 const historyList = document.getElementById('history-list');
 const historyArrow = document.getElementById('history-arrow');
+const bulkIntervalBtn = document.getElementById('bulk-interval-btn');
 
 const hasChromeStorage = typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync;
 const hasTabsApi = typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query;
 const hasScripting = typeof chrome !== 'undefined' && chrome.scripting && chrome.scripting.executeScript;
+const DEFAULT_INTERVAL = 500;
 
 // ---- 状态 ----
 let editingId = null;
@@ -373,7 +375,7 @@ function enterEditMode(monitor) {
   inputAttribute.value = monitor.attribute || 'text';
   inputName.value = monitor.name || '';
   inputUrl.value = monitor.url || '';
-  inputInterval.value = monitor.interval || 1000;
+  inputInterval.value = monitor.interval || DEFAULT_INTERVAL;
 
   syncTypeSections();
   hidePickedInfo();
@@ -401,7 +403,7 @@ function exitEditMode() {
   form.reset();
   inputType.value = 'page';
   inputAttribute.value = 'text';
-  inputInterval.value = 1000;
+  inputInterval.value = DEFAULT_INTERVAL;
   syncTypeSections();
   hidePickedInfo();
   pickedElement = null;
@@ -437,7 +439,7 @@ function collectFormData() {
     type: inputType.value,
     name: inputName.value.trim(),
     url: normalizeUrl(inputUrl.value),
-    interval: Math.max(1, parseInt(inputInterval.value, 10) || 1000)
+    interval: Math.max(1, parseInt(inputInterval.value, 10) || DEFAULT_INTERVAL)
   };
 }
 
@@ -545,7 +547,7 @@ async function addMonitor(data) {
   form.reset();
   inputType.value = 'page';
   inputAttribute.value = 'text';
-  inputInterval.value = 1000;
+  inputInterval.value = DEFAULT_INTERVAL;
   syncTypeSections();
   renderList();
 
@@ -607,7 +609,7 @@ confirmOverwriteBtn.addEventListener('click', async () => {
   form.reset();
   inputType.value = 'page';
   inputAttribute.value = 'text';
-  inputInterval.value = 1000;
+  inputInterval.value = DEFAULT_INTERVAL;
   syncTypeSections();
   renderList();
 
@@ -672,6 +674,24 @@ async function renderList() {
     meta.title = m.selector || '';
     info.appendChild(meta);
 
+    if (m.lastError) {
+      const errEl = document.createElement('p');
+      errEl.className = 'watcher-error';
+      errEl.textContent = '⚠ 上次检查失败：' + m.lastError;
+      errEl.title = m.lastError;
+      info.appendChild(errEl);
+    } else if (m.lastCheck) {
+      const timeEl = document.createElement('p');
+      timeEl.className = 'watcher-time';
+      const d = new Date(m.lastCheck);
+      timeEl.textContent = '上次检查：' + d.toLocaleString() + (m.nextCheckTime ? ' · 下次：' + new Date(m.nextCheckTime).toLocaleString() : '');
+      info.appendChild(timeEl);
+    }
+
+    const feedback = document.createElement('p');
+    feedback.className = 'watcher-feedback hidden';
+    info.appendChild(feedback);
+
     const actions = document.createElement('div');
     actions.className = 'item-actions';
 
@@ -680,7 +700,7 @@ async function renderList() {
     check.type = 'button';
     check.textContent = '立即检查';
     check.title = '立即执行一次检查';
-    check.addEventListener('click', () => checkNow(m.id, check));
+    check.addEventListener('click', () => checkNow(m.id, check, feedback));
 
     const edit = document.createElement('button');
     edit.className = 'btn-check';
@@ -706,34 +726,69 @@ async function renderList() {
 }
 
 // ---- 立即检查 ----
-async function checkNow(id, btn) {
+async function checkNow(id, btn, feedback) {
   btn.disabled = true;
   btn.textContent = '...';
   hideStatus();
+  showCheckFeedback(feedback, '正在检查...', false);
   try {
     if (!(hasChromeStorage && chrome.runtime && chrome.runtime.sendMessage)) {
-      showStatus('本地预览模式不支持检查', true);
+      showCheckFeedback(feedback, '本地预览模式不支持检查', true);
       return;
     }
     const res = await chrome.runtime.sendMessage({ type: 'check-now', id: id });
     if (!res || !res.ok) {
-      showStatus('检查失败，详见 Service Worker 日志', true);
+      showCheckFeedback(feedback, '检查失败：' + ((res && res.error) || '未知错误') + '，请查看 Service Worker 日志', true);
     } else if (res.result === 'changed') {
-      showStatus('检测到变化，已发送通知 ✓', false);
+      showCheckFeedback(feedback, '检测到变化，已发送通知 ✓', false);
       renderUnread();
+      renderList();
     } else if (res.result === 'not-found') {
-      showStatus('未找到目标元素，页面结构可能已变化', true);
+      showCheckFeedback(feedback, '未找到目标元素，页面结构可能已变化（已尝试自愈）', true);
+    } else if (res.result === 'error') {
+      showCheckFeedback(feedback, '网络请求失败，请检查网址或网络', true);
+      renderList();
+    } else if (res.result === 'flaky') {
+      showCheckFeedback(feedback, '检测到抖动，已抑制通知（下次再确认）', false);
     } else {
-      showStatus('暂无变化', false);
+      showCheckFeedback(feedback, '暂无变化', false);
+      renderList();
     }
   } catch (err) {
     console.error('[333 Watcher] check-now failed:', err);
-    showStatus('检查失败，详见 Service Worker 日志', true);
+    showCheckFeedback(feedback, '检查失败，详见 Service Worker 日志', true);
   } finally {
     btn.disabled = false;
     btn.textContent = '立即检查';
   }
 }
+
+function showCheckFeedback(element, text, isError) {
+  if (!element) return;
+  listEl.querySelectorAll('.watcher-feedback').forEach((item) => {
+    item.classList.add('hidden');
+    item.classList.remove('error');
+  });
+  element.textContent = text;
+  element.classList.remove('hidden');
+  element.classList.toggle('error', !!isError);
+}
+
+// ---- 批量更新已有监控的检查间隔 ----
+bulkIntervalBtn.addEventListener('click', async () => {
+  const monitors = await getMonitors();
+  if (!monitors.length) {
+    showStatus('还没有可更新的监控', true);
+    return;
+  }
+  const confirmed = window.confirm('确定把全部 ' + monitors.length + ' 个监控的检查间隔改为 500 分钟吗？');
+  if (!confirmed) return;
+
+  const updated = monitors.map((m) => ({ ...m, interval: DEFAULT_INTERVAL }));
+  await saveMonitors(updated);
+  renderList();
+  showStatus('已将 ' + updated.length + ' 个监控的检查间隔改为 500 分钟 ✓', false);
+});
 
 // ---- 测试通知 ----
 const testNotifyBtn = document.getElementById('test-notify-btn');
@@ -764,6 +819,13 @@ async function removeMonitor(id) {
   const target = monitors.find((m) => m.id === id);
   const url = target ? normalizeUrl(target.url || '') : '';
   // 同一网址的所有监控一起删除，避免残留监控继续发通知
+  if (url) {
+    const sameUrl = monitors.filter((m) => normalizeUrl(m.url || '') === url);
+    if (sameUrl.length > 1) {
+      const ok = window.confirm('该网址有 ' + sameUrl.length + ' 个监控，将一并删除，是否继续？');
+      if (!ok) return;
+    }
+  }
   const kept = url
     ? monitors.filter((m) => normalizeUrl(m.url || '') !== url)
     : monitors.filter((m) => m.id !== id);
@@ -893,3 +955,7 @@ importConfirmBtn.addEventListener('click', async () => {
     fillFromActiveTab();
   }
 })();
+
+
+
+

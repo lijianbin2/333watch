@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
@@ -53,7 +53,8 @@
       </label>
       <label class="field">
         <span class="field-label">检查间隔（分钟）</span>
-        <input id="input-interval" type="number" min="1" value="1000" required>
+        <input id="input-interval" type="number" min="1" value="500" required>
+        <span class="field-hint interval-hint">默认 500 分钟≈8小时，适合公告/低频监控；高频可改为 5-60 分钟</span>
       </label>
 
       <div id="element-section" class="element-section hidden">
@@ -83,7 +84,10 @@
     </div>
 
     <section class="monitor-section">
-      <p class="section-label">已保存的监控（<span id="monitor-count">0</span>）</p>
+      <div class="monitor-section-head">
+        <p class="section-label">已保存的监控（<span id="monitor-count">0</span>）</p>
+        <button type="button" id="bulk-interval-btn" class="btn-ghost-small">全部500分钟</button>
+      </div>
       <ul id="monitor-list" class="watcher-list"></ul>
     </section>
 
@@ -104,7 +108,7 @@
     </div>
 
     <footer class="footer">
-      <span id="footer-version" class="footer-version">333 Watcher v0.5.7</span>
+      <span id="footer-version" class="footer-version">333 Watcher v0.6.1</span>
       <a id="about-link" class="footer-link" href="https://github.com/lijianbin2/333watch">GitHub</a>
     </footer>
   </div>
@@ -112,3 +116,7 @@
   <script src="add-monitor.js"></script>
 </body>
 </html>
+
+
+
+

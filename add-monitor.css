@@ -128,6 +128,23 @@ body {
   color: #8b949e;
 }
 
+.monitor-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.watcher-feedback {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #3fb950;
+}
+
+.watcher-feedback.error {
+  color: #f85149;
+}
+
 .watcher-list {
   list-style: none;
   display: flex;
@@ -715,3 +732,8 @@ body {
   color: #f85149;
 }
 
+
+.field-hint.interval-hint { font-size: 11px; color: #8b949e; margin-top: 4px; display: block; line-height: 1.4; }
+
+.watcher-error { font-size: 11px; color: #f85149; margin-top: 4px; line-height: 1.4; }
+.watcher-time { font-size: 11px; color: #8b949e; margin-top: 2px; line-height: 1.4; }

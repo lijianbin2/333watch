@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.5.7)
+ * 333 Watcher - Background Service Worker (v0.6.1)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -11,6 +11,7 @@ const DEBUG = false; // 发布版关闭信息日志，调试时改为 true
 function dbg(...args) { if (DEBUG) console.log(...args); }
 
 const ALARM_PREFIX = 'monitor-';
+const DEFAULT_INTERVAL = 500;
 
 // ---------------- 工具 ----------------
 function simpleHash(str) {
@@ -98,7 +99,7 @@ async function savePickedMonitor(pick, attribute) {
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     name: name,
     url: url,
-    interval: 1000,
+      interval: DEFAULT_INTERVAL,
     type: 'element',
     selector: pick.selector,
     attribute: attr,
@@ -137,7 +138,7 @@ async function migrateData() {
           id: w.id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)),
           name: w.name || w.url,
           url: url,
-          interval: Math.max(1, Number(w.interval) || 1000),
+          interval: Math.max(1, Number(w.interval) || DEFAULT_INTERVAL),
           type: 'page',
           createdAt: w.createdAt || new Date().toISOString()
         });
@@ -165,7 +166,7 @@ async function migrateData() {
       id: m.id,
       name: m.name || m.url,
       url: normalizeUrl(m.url),
-      interval: Math.max(1, Number(m.interval) || 1000),
+      interval: Math.max(1, Number(m.interval) || DEFAULT_INTERVAL),
       type: m.type || 'page',
       selector: m.selector || '',
       attribute: m.attribute || '',
@@ -237,28 +238,43 @@ async function syncAlarms() {
 }
 
 // ---------------- Offscreen DOM 查询（element 类型用） ----------------
+let _offscreenLock = null;
+let _offscreenCloseTimer = null;
 async function ensureOffscreen() {
-  try {
-    const exists = await chrome.offscreen.hasDocument();
-    if (!exists) {
-      await chrome.offscreen.createDocument({
-        url: 'offscreen.html',
-        reasons: ['DOM_PARSER'],
-        justification: 'Parse monitored page HTML to query monitored element'
-      });
-    }
-  } catch (err) {
-    // hasDocument 不存在或文档已存在等异常情况，尝试直接创建
+  if (_offscreenLock) { try { await _offscreenLock; return; } catch {} }
+  _offscreenLock = (async () => {
     try {
-      await chrome.offscreen.createDocument({
-        url: 'offscreen.html',
-        reasons: ['DOM_PARSER'],
-        justification: 'Parse monitored page HTML to query monitored element'
-      });
-    } catch (e) {
-      console.warn('[333 Watcher] offscreen setup:', e.message);
+      let exists = false;
+      try { exists = await chrome.offscreen.hasDocument(); } catch {}
+      if (!exists) {
+        await chrome.offscreen.createDocument({
+          url: 'offscreen.html',
+          reasons: ['DOM_PARSER'],
+          justification: 'Parse monitored page HTML to query monitored element'
+        });
+      }
+    } catch (err) {
+      try {
+        await chrome.offscreen.createDocument({
+          url: 'offscreen.html',
+          reasons: ['DOM_PARSER'],
+          justification: 'Parse monitored page HTML to query monitored element'
+        });
+      } catch (e) {
+        console.warn('[333 Watcher] offscreen setup:', e.message);
+      }
     }
-  }
+  })();
+  try { await _offscreenLock; } finally { _offscreenLock = null; }
+  if (_offscreenCloseTimer) { clearTimeout(_offscreenCloseTimer); _offscreenCloseTimer = null; }
+}
+
+function scheduleOffscreenClose() {
+  if (_offscreenCloseTimer) clearTimeout(_offscreenCloseTimer);
+  _offscreenCloseTimer = setTimeout(() => {
+    chrome.offscreen.closeDocument().catch(() => {});
+    _offscreenCloseTimer = null;
+  }, 3000);
 }
 
 async function queryElementValue(html, selector, attribute) {
@@ -269,7 +285,7 @@ async function queryElementValue(html, selector, attribute) {
     selector: selector,
     attribute: attribute
   });
-  chrome.offscreen.closeDocument().catch(() => {});
+  scheduleOffscreenClose();
   return resp;
 }
 
@@ -312,11 +328,11 @@ async function checkElement(monitor, html) {
   const attribute = monitor.attribute || 'text';
   const resp = await queryElementValue(html, monitor.selector, attribute);
 
-  if ((!resp || !resp.ok) && attribute === 'href' && monitor.lastValue) {
-    // 选择器失效自愈：网站改版后元素 id 可能变化，按上次记录的 href 找回同一元素
-    const found = await findElementByValue(monitor.url, html, monitor.lastValue);
+  if ((!resp || !resp.ok) && monitor.lastValue) {
+    // 选择器失效自愈：支持 text/href/src 按 lastValue 找回元素
+    const found = await findElementByValue(monitor.url, html, monitor.lastValue, attribute);
     if (found && found.ok) {
-      dbg('[333 Watcher] [element] selector healed:', found.selector);
+      dbg('[333 Watcher] [element] selector healed:', found.selector, 'attr:', attribute);
       return { changed: false, update: { selector: found.selector }, healed: true };
     }
   }
@@ -327,7 +343,7 @@ async function checkElement(monitor, html) {
   }
 
   let current = resp.value;
-  if (attribute === 'href' && current) {
+  if ((attribute === 'href' || attribute === 'src') && current) {
     try {
       current = new URL(current, monitor.url).href; // 相对路径转绝对
     } catch {}
@@ -345,16 +361,17 @@ async function checkElement(monitor, html) {
 
 // ---------------- 检测主流程 ----------------
 // ---------------- 选择器自愈 / 二次确认 ----------------
-async function findElementByValue(baseUrl, html, value) {
+async function findElementByValue(baseUrl, html, value, attribute) {
   try {
     await ensureOffscreen();
     const resp = await chrome.runtime.sendMessage({
       type: 'find-by-value',
       html: html,
       baseUrl: baseUrl,
-      value: value
+      value: value,
+      attribute: attribute || 'text'
     });
-    chrome.offscreen.closeDocument().catch(() => {});
+    scheduleOffscreenClose();
     return resp;
   } catch (err) {
     console.warn('[333 Watcher] findElementByValue failed:', err.message);
@@ -368,7 +385,7 @@ async function getCurrentValue(monitor, html) {
     const resp = await queryElementValue(html, monitor.selector, attribute);
     if (!resp || !resp.ok) return { ok: false };
     let v = resp.value;
-    if (attribute === 'href' && v) {
+    if ((attribute === 'href' || attribute === 'src') && v) {
       try { v = new URL(v, monitor.url).href; } catch {}
     }
     return { ok: true, value: v };
@@ -422,9 +439,19 @@ async function checkMonitor(monitor) {
   let html;
   try {
     const res = await fetch(monitor.url, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
     html = await res.text();
   } catch (err) {
     console.error('[333 Watcher] fetch failed:', monitor.url, err.message);
+    // 记录错误到存储，供 UI 显示
+    try {
+      const list = await getMonitors();
+      const i = list.findIndex((m) => m.id === monitor.id);
+      if (i !== -1) {
+        list[i] = { ...list[i], lastError: err.message || 'fetch failed', lastCheck: checkedAt, lastCheckTime: Date.now() };
+        await saveMonitors(list);
+      }
+    } catch {}
     return 'error';
   }
 
@@ -456,7 +483,8 @@ async function checkMonitor(monitor) {
     ...outcome.update,
     lastCheck: checkedAt,
     lastCheckTime: nowTs,
-    nextCheckTime: nowTs + Math.max(1, Number(monitors[idx].interval) || 1) * 60000
+    nextCheckTime: nowTs + Math.max(1, Number(monitors[idx].interval) || DEFAULT_INTERVAL) * 60000,
+    lastError: ''
   };
   await saveMonitors(monitors);
 
@@ -635,7 +663,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-dbg('[333 Watcher] Background service worker loaded (v0.5.7)');
+dbg('[333 Watcher] Background service worker loaded (v0.6.1)');
 
 
 
@@ -783,6 +811,9 @@ async function catchUpChecks() {
 chrome.runtime.onStartup.addListener(async () => {
   await catchUpChecks();
 });
+
+
+
 
 
 

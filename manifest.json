@@ -1,7 +1,7 @@
-﻿{
+{
   "manifest_version": 3,
   "name": "333 Watcher",
-  "version": "0.5.7",
+  "version": "0.6.1",
   "description": "Monitor website changes and notify updates",
   "action": {
     "default_popup": "add-monitor.html",
@@ -25,9 +25,7 @@
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
-  }
+  },
+  "homepage_url": "https://github.com/lijianbin2/333watch"
 }
-
-
-
 

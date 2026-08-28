@@ -26,3 +26,15 @@ Thumbs.db
 # 编辑器
 .vscode/
 .idea/
+
+# 调试产物（本地排查日志，不入库）
+store-snapshot*.txt
+store-open*.txt
+chrome-*.txt
+browser-*.txt
+sky-*.txt
+upload-*.txt
+tab6-*.txt
+session-check*.txt
+newtab-debug*.txt
+
