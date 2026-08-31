@@ -1,30 +1,30 @@
-{
-  "manifest_version": 3,
-  "name": "333 Watcher",
-  "version": "0.6.5",
-  "description": "Monitor website changes and notify updates (fix picker overlay on Vue docs)",
-  "action": {
-    "default_popup": "add-monitor.html",
-    "default_title": "333 Watcher"
-  },
-  "background": {
-    "service_worker": "background.js"
-  },
-  "permissions": [
-    "storage",
-    "notifications",
-    "alarms",
-    "activeTab",
-    "scripting",
-    "offscreen"
-  ],
-  "host_permissions": [
-    "<all_urls>"
-  ],
-  "icons": {
-    "16": "icons/icon16.png",
-    "48": "icons/icon48.png",
-    "128": "icons/icon128.png"
-  },
-  "homepage_url": "https://github.com/lijianbin2/333watch"
+﻿{
+    "manifest_version":  3,
+    "name":  "333 Watcher",
+    "version":  "0.6.6",
+    "description":  "Monitor website changes and notify updates (fix picker v0.6.6 - robust highlight)",
+    "action":  {
+                   "default_popup":  "add-monitor.html",
+                   "default_title":  "333 Watcher"
+               },
+    "background":  {
+                       "service_worker":  "background.js"
+                   },
+    "permissions":  [
+                        "storage",
+                        "notifications",
+                        "alarms",
+                        "activeTab",
+                        "scripting",
+                        "offscreen"
+                    ],
+    "host_permissions":  [
+                             "\u003call_urls\u003e"
+                         ],
+    "icons":  {
+                  "16":  "icons/icon16.png",
+                  "48":  "icons/icon48.png",
+                  "128":  "icons/icon128.png"
+              },
+    "homepage_url":  "https://github.com/lijianbin2/333watch"
 }
