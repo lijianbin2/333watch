@@ -11,6 +11,7 @@ const DEBUG = false; // 发布版关闭信息日志，调试时改为 true
 function dbg(...args) { if (DEBUG) console.log(...args); }
 
 const ALARM_PREFIX = 'monitor-';
+const _checkLock = new Set();
 const DEFAULT_INTERVAL = 500;
 
 // ---------------- 工具 ----------------
@@ -423,6 +424,9 @@ async function confirmChange(monitor, newValue) {
 }
 
 async function checkMonitor(monitor) {
+  if (_checkLock.has(monitor.id)) { dbg('[333 Watcher] check skipped (in-flight):', monitor.id); return 'locked'; }
+  _checkLock.add(monitor.id);
+  try {
   const checkedAt = new Date().toISOString();
   dbg('[333 Watcher] ---- check start ----');
   dbg('[333 Watcher] time:', checkedAt);
@@ -506,6 +510,7 @@ async function checkMonitor(monitor) {
     return 'changed';
   }
   return 'unchanged';
+  } finally { _checkLock.delete(monitor.id); }
 }
 
 // ---------------- 通知（带诊断） ----------------
@@ -695,6 +700,10 @@ async function saveHistory(history) {
 async function addHistory(record) {
   try {
     const history = await getHistory();
+    const now = Date.now();
+    const dedupWindow = 5 * 60 * 1000;
+    const isDup = history.some(h => h.message === record.message && h.url === record.url && Math.abs(now - new Date(h.time).getTime()) < dedupWindow);
+    if (isDup) { dbg('[333 Watcher] history dedup skipped:', record.message); return; }
     history.unshift({
       id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
       name: record.name,
