@@ -38,8 +38,10 @@
     'background:#1f6feb;color:#ffffff;font:12px/1.5 sans-serif;' +
     'padding:2px 8px;border-radius:4px;display:none;';
 
-  document.documentElement.appendChild(overlay);
-  document.documentElement.appendChild(tip);
+  // 微信文档等 Vue 页可能对 documentElement 有特殊样式，优先挂 body，兜底 documentElement
+  try { (document.body || document.documentElement).appendChild(overlay); } catch (e) { try{ document.documentElement.appendChild(overlay);}catch{}}
+  try { (document.body || document.documentElement).appendChild(tip); } catch (e) { try{ document.documentElement.appendChild(tip);}catch{}}
+  console.log('[333 Watcher] picker overlay injected', overlay, tip);
 
   // 生成 CSS selector：优先 #id / 特征属性，否则 tag + :nth-of-type 路径
   function getSelector(el) {
@@ -87,7 +89,12 @@
   }
 
   function onMove(e) {
-    const el = e.target;
+    let el = e.target;
+    // 跳过我们自己的蒙层/tip/对话框
+    if (el === overlay || el === tip || (dialogHost && dialogHost.contains(el))) return;
+    // shadow host 补偿
+    if (el && el.shadowRoot) el = e.composedPath ? e.composedPath()[0] : el;
+    if (!el || !el.getBoundingClientRect) return;
     const r = el.getBoundingClientRect();
     overlay.style.display = 'block';
     overlay.style.left = r.left + 'px';
@@ -137,6 +144,8 @@
   function stopPickMode() {
     document.removeEventListener('mousemove', onMove, true);
     document.removeEventListener('click', onClick, true);
+    window.removeEventListener('mousemove', onMove, true);
+    window.removeEventListener('click', onClick, true);
     overlay.style.display = 'none';
     tip.style.display = 'none';
   }
@@ -144,6 +153,10 @@
   function startPickMode() {
     document.addEventListener('mousemove', onMove, true);
     document.addEventListener('click', onClick, true);
+    window.addEventListener('mousemove', onMove, true);
+    window.addEventListener('click', onClick, true);
+    // 强制让页面获得焦点，避免 iframe 失焦导致不动
+    try { window.focus(); } catch {}
   }
 
   function attributeLabel(attr) {
@@ -321,7 +334,7 @@
     box.textContent = text;
     shadow.appendChild(style);
     shadow.appendChild(box);
-    document.documentElement.appendChild(host);
+    try { (document.body || document.documentElement).appendChild(host); } catch(e){ document.documentElement.appendChild(host); }
     setTimeout(() => host.remove(), 2400);
   }
 
