@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 333 Watcher - 元素选择器 Content Script
  *
  * 由 popup 通过 chrome.scripting.executeScript 注入。
@@ -35,9 +35,27 @@
   document.documentElement.appendChild(overlay);
   document.documentElement.appendChild(tip);
 
-  // 生成 CSS selector：优先 #id，否则 tag + :nth-of-type 路径
+  // 生成 CSS selector：优先 #id / 特征属性，否则 tag + :nth-of-type 路径
   function getSelector(el) {
+    // 1) a 标签优先用可自愈的属性选择器，避免 nth-of-type 脆弱链
+    if (el.tagName === 'A' || el.closest('a')) {
+      const a = el.closest('a') || el;
+      const href = a.getAttribute('href') || '';
+      if (href.includes('wechat_devtools')) return 'a[href*=''wechat_devtools'']';
+      if (href.endsWith('.exe')) return 'a[href$=''.exe'']';
+      if (href) {
+        try {
+          const u = new URL(a.href);
+          if (u.hostname.includes('wxqcloud')) return 'a[href*=''wxqcloud'']';
+        } catch {}
+      }
+    }
+    // 2) 有稳定 id 直接用
     if (el.id) return '#' + CSS.escape(el.id);
+    // 3) 尝试用 data-* 或 class 构成更稳的路径
+    if (el.getAttribute && el.getAttribute('data-testid')) {
+      return el.tagName.toLowerCase() + '[data-testid=''' + CSS.escape(el.getAttribute('data-testid')) + ''']';
+    }
     const parts = [];
     let node = el;
     while (node && node.nodeType === 1 && node.tagName !== 'HTML') {
@@ -58,6 +76,7 @@
       parts.unshift(part);
       node = parent;
     }
+    // 兜底：给超长 nth-of-type 链追加文本锚点提示，仍返回路径
     return parts.join(' > ');
   }
 

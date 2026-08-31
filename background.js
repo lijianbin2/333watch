@@ -1,5 +1,5 @@
-/**
- * 333 Watcher - Background Service Worker (v0.6.1)
+﻿/**
+ * 333 Watcher - Background Service Worker (v0.6.3 - json support)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -299,6 +299,32 @@ async function checkPage(monitor, html) {
   return { changed, update: { lastHash: newHash } };
 }
 
+// ---------------- 检测：json (微信开发者工具 config.json 专用) ----------------
+function extractWechatVersion(jsonText) {
+  try {
+    const data = JSON.parse(jsonText);
+    const channels = data.channels || data.data || [];
+    // 优先稳定版
+    let ch = Array.isArray(channels) ? channels.find(c => c.id === "stable") : null;
+    if (!ch && Array.isArray(channels) && channels.length) ch = channels[0];
+    if (!ch) return null;
+    // 返回版本号或完整下载链接，以“版本|链接”作为监控值，便于 diff
+    const win = (ch.downloads || []).find(d => d.os === "Windows" && d.arch === "64") || (ch.downloads||[])[0];
+    const ver = ch.version || "";
+    const url = win ? win.url : "";
+    return ver + "|" + url;
+  } catch { return null; }
+}
+async function checkJson(monitor, text) {
+  const cur = extractWechatVersion(text);
+  if (!cur) {
+    // 非预期 JSON，退化为 hash 对比
+    return await checkPage(monitor, text);
+  }
+  const last = monitor.lastValue || null;
+  const changed = last !== null && cur !== last;
+  return { changed, prevValue: last, update: { lastValue: cur } };
+}
 // ---------------- 检测：link（旧版，兼容保留） ----------------
 async function checkLink(monitor, html) {
   const links = extractLinks(html, monitor.url);
@@ -469,8 +495,17 @@ async function checkMonitor(monitor) {
     }
   } else if (type === 'link' || type === 'download') {
     outcome = await checkLink(monitor, html);
+  } else if (type === 'json' || (html.trim().startsWith('{') && html.includes('"channels"'))) {
+    outcome = await checkJson(monitor, html);
   } else {
-    outcome = await checkPage(monitor, html);
+    // 自动识别微信 config.json：即使 type 写 page 也能走 JSON 解析
+    if (monitor.url.includes('config.json') || monitor.url.includes('wxqcloud')) {
+      const maybe = extractWechatVersion(html);
+      if (maybe) outcome = await checkJson(monitor, html);
+      else outcome = await checkPage(monitor, html);
+    } else {
+      outcome = await checkPage(monitor, html);
+    }
   }
 
   if (outcome.notFound) {
