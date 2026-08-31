@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "333 Watcher",
-  "version": "0.6.3",
-  "description": "Monitor website changes and notify updates (support SPA JSON)",
+  "version": "0.6.4",
+  "description": "Monitor website changes and notify updates (fix picker re-entry)",
   "action": {
     "default_popup": "add-monitor.html",
     "default_title": "333 Watcher"

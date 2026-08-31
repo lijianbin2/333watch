@@ -10,7 +10,13 @@
  * 浮层内可直接选择监控类型并保存，无需再次打开扩展 popup。
  */
 (function () {
-  if (window.__w333PickerActive) return;
+  // 允许重复点击「选择网页元素」：若已激活则先清理再重启
+  if (window.__w333PickerActive) {
+    try { window.__w333PickerCleanup && window.__w333PickerCleanup(); } catch {}
+    try {
+      document.querySelectorAll('div').forEach(d=>{ if(d.style && d.style.zIndex==='2147483646') d.remove(); });
+    } catch {}
+  }
   window.__w333PickerActive = true;
   const DEBUG = false;
   function dbg(...args) { if (DEBUG) console.log(...args); }
@@ -323,6 +329,7 @@
     if (e.key === 'Escape') cleanup();
   }
 
+  window.__w333PickerCleanup = cleanup;
   function cleanup() {
     stopPickMode();
     document.removeEventListener('keydown', onKey, true);
@@ -343,5 +350,7 @@
 
   startPickMode();
   document.addEventListener('keydown', onKey, true);
+  // 激活提示，避免用户以为没反应
+  showToast('已进入选择模式：鼠标移动高亮，点击选中，Esc 退出');
   dbg('[333 Watcher] picker activated');
 })();

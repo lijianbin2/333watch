@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 333 Watcher - Add Monitor 页面逻辑 (v0.6.1)
  *
  * 监控类型：
@@ -312,7 +312,8 @@ pickElementBtn.addEventListener('click', async () => {
       target: { tabId: tab.id },
       files: ['picker.js']
     });
-    window.close();
+    showStatus('已注入选择器，请回到网页移动鼠标高亮元素', false);
+    setTimeout(() => window.close(), 800);
   } catch (err) {
     console.error('[333 Watcher] picker inject failed:', err);
     showStatus('注入失败：' + err.message, true);
