@@ -466,8 +466,17 @@ async function checkMonitor(monitor) {
     return 'deleted';
   }
 
+  // 微信开发者工具下载页 SPA 特殊处理：直接监控 config.json
+  const isWechatDownload = monitor.url.includes('developers.weixin.qq.com/miniprogram/dev/devtools/download') || monitor.url.includes('wechat_devtools');
   let html;
+  let wechatJsonText = null;
   try {
+    if (isWechatDownload) {
+      try {
+        const jres = await fetch('https://devtools.wxqcloud.qq.com.cn/WechatWebDev/release/config.json', { cache: 'no-store' });
+        if (jres.ok) wechatJsonText = await jres.text();
+      } catch {}
+    }
     const res = await fetch(monitor.url, { cache: 'no-store' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     html = await res.text();
@@ -487,7 +496,24 @@ async function checkMonitor(monitor) {
 
   const type = monitor.type || 'page';
   let outcome;
-  if (type === 'element') {
+  if (isWechatDownload && wechatJsonText) {
+    outcome = await checkJson(monitor, wechatJsonText);
+    // 兼容旧监控：若之前存的是文本/单链接，首次对接到 JSON 的 版本|链接 时不算作变更，只做自愈更新
+    if (outcome && outcome.changed && monitor.lastValue && !String(monitor.lastValue).includes('|') && String(outcome.update.lastValue||'').includes('|')) {
+      outcome.changed = false;
+    }
+    if (!outcome || outcome.notFound) {
+      if (type === 'element') {
+        if (!monitor.selector && (monitor.targetHref || monitor.targetText)) {
+          outcome = await checkLink(monitor, html);
+        } else {
+          outcome = await checkElement(monitor, html);
+        }
+      } else {
+        outcome = await checkJson(monitor, wechatJsonText);
+      }
+    }
+  } else if (type === 'element') {
     if (!monitor.selector && (monitor.targetHref || monitor.targetText)) {
       outcome = await checkLink(monitor, html);
     } else {

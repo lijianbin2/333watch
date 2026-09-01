@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "333 Watcher",
-  "version": "0.6.6",
-  "description": "Monitor website changes and notify updates (fix picker v0.6.6 - robust highlight)",
+  "version": "0.6.8",
+  "description": "Monitor website changes and notify updates (fix wechat download SPA JSON, picker GBK fix)",
   "action": {
     "default_popup": "add-monitor.html",
     "default_title": "333 Watcher"
