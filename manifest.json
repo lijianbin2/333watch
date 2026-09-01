@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "333 Watcher",
-  "version": "0.6.11",
-  "description": "Monitor website changes and notify updates (fix page-type not entering picker, v0.6.11)",
+  "version": "0.6.12",
+  "description": "Monitor website changes and notify updates (remove image monitoring, hide save button in element mode, v0.6.12)",
   "action": {
     "default_popup": "add-monitor.html",
     "default_title": "333 Watcher"

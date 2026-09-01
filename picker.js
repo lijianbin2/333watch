@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - 元素选择器 Content Script v0.6.6
+ * 333 Watcher - 元素选择器 Content Script v0.6.12
  * 修复：微信文档等 Vue 页面选不到的问题
  */
 (function () {
@@ -182,8 +182,8 @@
     pollTimer = setInterval(pollHighlight, 120);
   }
 
-  function attributeLabel(attr){ if(attr==='href')return'链接地址'; if(attr==='src')return'图片地址'; return'文字内容'; }
-  function attributeValue(pick,attr){ if(attr==='href')return pick.href||''; if(attr==='src')return pick.src||''; return pick.text||''; }
+  function attributeLabel(attr){ if(attr==='href')return'链接地址'; return'文字内容'; }
+  function attributeValue(pick,attr){ if(attr==='href')return pick.href||''; return pick.text||''; }
 
   var DIALOG_CSS='.w333-backdrop{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(3,9,18,0.62);font-family:\Segoe UI\,system-ui,-apple-system,sans-serif;z-index:2147483647;}'
     +'.w333-card{width:330px;max-width:calc(100vw - 32px);background:#0d1626;border:1px solid #24405f;border-radius:8px;padding:16px;color:#e6edf6;box-shadow:0 14px 44px rgba(0,0,0,0.55);box-sizing:border-box;}'
@@ -204,12 +204,12 @@
     var card = document.createElement('div'); card.className='w333-card';
     var head = document.createElement('div'); head.className='w333-head'; head.textContent='已选择元素';
     var elBox = document.createElement('div'); elBox.className='w333-element';
-    var attr = ['href','src'].indexOf(pickResult.attribute)!==-1 ? pickResult.attribute : 'text';
+    var attr = pickResult.attribute === 'href' ? 'href' : 'text';
     var sample = attributeValue(pickResult, attr);
     elBox.textContent = pickResult.tagName + ' · ' + attributeLabel(attr) + (sample ? ' · ' + sample.slice(0,40) : ''); elBox.title = pickResult.selector||'';
     var typeLabel = document.createElement('div'); typeLabel.className='w333-label'; typeLabel.textContent='选择监控类型';
     var options = document.createElement('div'); options.className='w333-options';
-    [['text','文字变化'],['href','链接地址变化'],['src','图片地址变化']].forEach(function(pair){
+    [['text','文字变化'],['href','链接地址变化']].forEach(function(pair){
       var lab=document.createElement('label'); lab.className='w333-option';
       var input=document.createElement('input'); input.type='radio'; input.name='w333-attr'; input.value=pair[0]; input.checked=(attr===pair[0]);
       var span=document.createElement('span'); span.textContent=pair[1]; lab.appendChild(input); lab.appendChild(span); options.appendChild(lab);

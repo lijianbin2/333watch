@@ -752,7 +752,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-dbg('[333 Watcher] Background service worker loaded (v0.6.11)');
+dbg('[333 Watcher] Background service worker loaded (v0.6.12)');
 
 
 

@@ -1,12 +1,12 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.1)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.12)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
- * - element：指定内容变化（CSS selector + 属性 text/href/src）
+ * - element：指定内容变化（CSS selector + 属性 text/href）
  *
  * 兼容：
- * - 旧 type="link" 由 background 迁移为 type="element" + attribute="href"
+ * - 旧 type="link" 由 background 迁移为 type="element" + attribute="href"（v0.6.12 已移除 src 图片监控）
  */
 
 const form = document.getElementById('monitor-form');
@@ -325,6 +325,11 @@ document.getElementById('about-link').addEventListener('click', (e) => {
 function syncTypeSections() {
   const t = inputType.value;
   elementSection.classList.toggle('hidden', t !== 'element');
+  // 指定内容模式下“保存监控”按钮多余（由页面内 picker 浮层直接保存），新增时隐藏；编辑态保留以便保存名称/间隔修改
+  if (submitBtn) {
+    const hideSave = t === 'element' && editingId === null;
+    submitBtn.classList.toggle('hidden', hideSave);
+  }
   if (t !== 'element') {
     // 切到“整个网页”时，清理残留的点选状态并关闭网页上的选择浮层，避免误进选元素模式
     pickedElement = null;
@@ -340,7 +345,6 @@ inputType.addEventListener('change', syncTypeSections);
 // 属性标签
 function attributeLabel(attr) {
   if (attr === 'href') return '链接地址';
-  if (attr === 'src') return '图片地址';
   return '文本内容';
 }
 
@@ -401,7 +405,7 @@ async function loadPendingPick() {
     if (!pendingPick || !pendingPick.selector) return false;
     pickedElement = pendingPick;
     inputType.value = 'element';
-    inputAttribute.value = pendingPick.attribute || 'text';
+    inputAttribute.value = (pendingPick.attribute === 'src' ? 'text' : (pendingPick.attribute || 'text'));
     inputUrl.value = pendingPick.pageUrl || '';
     inputName.value = pendingPick.pageTitle || pendingPick.text || '';
     syncTypeSections();
@@ -445,6 +449,7 @@ function enterEditMode(monitor) {
   }
 
   submitBtn.textContent = '保存修改';
+  if (submitBtn) submitBtn.classList.remove('hidden');
   editingBanner.classList.remove('hidden');
   hideStatus();
   hideOverwriteConfirm();
@@ -567,7 +572,6 @@ form.addEventListener('submit', async (e) => {
 
 function attributeValue(pick, attr) {
   if (attr === 'href') return pick.href || '';
-  if (attr === 'src') return pick.src || '';
   return pick.text || '';
 }
 
