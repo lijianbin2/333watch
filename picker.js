@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - 元素选择器 Content Script v0.6.13
+ * 333 Watcher - 元素选择器 Content Script v0.6.14
  * 修复：微信文档等 Vue 页面选不到的问题
  */
 (function () {
@@ -24,7 +24,7 @@
   badge = document.createElement('div');
   badge.setAttribute('data-w333','badge');
   badge.style.cssText = 'position:fixed;left:50%;top:8px;transform:translateX(-50%);z-index:2147483647;background:#0f2338;color:#fff;border:1px solid #2f81f7;border-radius:999px;padding:6px 14px;font:12px/1.4 sans-serif;box-shadow:0 4px 20px rgba(0,0,0,0.35);pointer-events:none;';
-  badge.textContent = '?? 选择模式：移动高亮 · 点击选中 · Esc 退出';
+  badge.textContent = '🎯 选择模式：移动高亮 · 点击选中 · Esc 退出';
 
   function appendSafe(node){
     try { (document.body || document.documentElement).appendChild(node); return true; } catch(e){ try{ document.documentElement.appendChild(node); return true; } catch(e2){ return false; } }
