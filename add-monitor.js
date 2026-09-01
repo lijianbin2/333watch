@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.12)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.13)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -12,6 +12,18 @@
 const form = document.getElementById('monitor-form');
 const inputType = document.getElementById('input-type');
 const inputAttribute = document.getElementById('input-attribute');
+let currentAttribute = 'text';
+function getSelectedAttribute() {
+  if (pickedElement && pickedElement.attribute) return pickedElement.attribute;
+  if (inputAttribute && inputAttribute.value) return inputAttribute.value;
+  return currentAttribute;
+}
+function setSelectedAttribute(val) {
+  const v = (val === 'src' ? 'text' : (val || 'text'));
+  currentAttribute = v;
+  if (pickedElement) pickedElement.attribute = v;
+  if (inputAttribute) inputAttribute.value = v;
+}
 const inputName = document.getElementById('input-name');
 const inputUrl = document.getElementById('input-url');
 const inputInterval = document.getElementById('input-interval');
@@ -405,7 +417,7 @@ async function loadPendingPick() {
     if (!pendingPick || !pendingPick.selector) return false;
     pickedElement = pendingPick;
     inputType.value = 'element';
-    inputAttribute.value = (pendingPick.attribute === 'src' ? 'text' : (pendingPick.attribute || 'text'));
+    setSelectedAttribute(pendingPick.attribute);
     inputUrl.value = pendingPick.pageUrl || '';
     inputName.value = pendingPick.pageTitle || pendingPick.text || '';
     syncTypeSections();
@@ -418,9 +430,9 @@ async function loadPendingPick() {
   }
 }
 
-inputAttribute.addEventListener('change', () => {
+if (inputAttribute) inputAttribute.addEventListener('change', () => {
   if (pickedElement) {
-    pickedElement.attribute = inputAttribute.value;
+    setSelectedAttribute(inputAttribute.value);
     showPickedInfo(pickedElement);
   }
 });
@@ -429,7 +441,7 @@ inputAttribute.addEventListener('change', () => {
 function enterEditMode(monitor) {
   editingId = monitor.id;
   inputType.value = monitor.type || 'page';
-  inputAttribute.value = monitor.attribute || 'text';
+  setSelectedAttribute(monitor.attribute);
   inputName.value = monitor.name || '';
   inputUrl.value = monitor.url || '';
   inputInterval.value = monitor.interval || DEFAULT_INTERVAL;
@@ -460,7 +472,7 @@ function exitEditMode() {
   editingId = null;
   form.reset();
   inputType.value = 'page';
-  inputAttribute.value = 'text';
+  setSelectedAttribute('text');
   inputInterval.value = DEFAULT_INTERVAL;
   syncTypeSections();
   hidePickedInfo();
@@ -533,10 +545,10 @@ form.addEventListener('submit', async (e) => {
     if (data.type === 'element') {
       if (pickedElement) {
         updated.selector = pickedElement.selector;
-        updated.attribute = inputAttribute.value;
+        updated.attribute = getSelectedAttribute();
         updated.lastValue = attributeValue(pickedElement, updated.attribute);
       } else {
-        updated.attribute = inputAttribute.value; // 保留旧 selector，只改属性也可
+        updated.attribute = getSelectedAttribute(); // 保留旧 selector，只改属性也可
         updated.lastValue = '';
       }
       updated.lastHash = '';
@@ -578,7 +590,7 @@ function attributeValue(pick, attr) {
 // ---- 新增 ----
 async function addMonitor(data) {
   const monitors = await getMonitors();
-  const attribute = data.type === 'element' ? inputAttribute.value : '';
+  const attribute = data.type === 'element' ? getSelectedAttribute() : '';
   const monitor = {
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     name: data.name,
@@ -603,7 +615,7 @@ async function addMonitor(data) {
   showStatus('已保存 ✓', false);
   form.reset();
   inputType.value = 'page';
-  inputAttribute.value = 'text';
+  setSelectedAttribute('text');
   inputInterval.value = DEFAULT_INTERVAL;
   syncTypeSections();
   renderList();
@@ -645,7 +657,7 @@ confirmOverwriteBtn.addEventListener('click', async () => {
     };
     if (data.type === 'element' && pickedElement) {
       updated.selector = pickedElement.selector;
-      updated.attribute = inputAttribute.value;
+      updated.attribute = getSelectedAttribute();
       updated.lastValue = attributeValue(pickedElement, updated.attribute);
     } else if (data.type === 'page') {
       updated.selector = '';
@@ -665,7 +677,7 @@ confirmOverwriteBtn.addEventListener('click', async () => {
   showStatus('已覆盖保存 ✓', false);
   form.reset();
   inputType.value = 'page';
-  inputAttribute.value = 'text';
+  setSelectedAttribute('text');
   inputInterval.value = DEFAULT_INTERVAL;
   syncTypeSections();
   renderList();
