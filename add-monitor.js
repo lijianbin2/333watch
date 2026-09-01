@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.15 - test mode)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.16 - text/href dual test)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -1025,112 +1025,118 @@ importConfirmBtn.addEventListener('click', async () => {
   }
   syncTypeSections();
 })();
-
-// ================= 🧪 测试模式 =================
-const TEST_URL = '333-test://demo';
-const testModeCard = document.getElementById('test-mode-card');
+// ================= 🧪 测试模式 (v0.6.16 text/href 双路) =================
+const TEST_URL_TEXT = '333-test://text';
+const TEST_URL_HREF = '333-test://link';
 const testModeToggle = document.getElementById('test-mode-toggle');
 const testModeBody = document.getElementById('test-mode-body');
 const testModeArrow = document.getElementById('test-mode-arrow');
-const testCreateBtn = document.getElementById('test-create-btn');
-const testChangeBtn = document.getElementById('test-change-btn');
-const testCheckBtn = document.getElementById('test-check-btn');
+const testCreateTextBtn = document.getElementById('test-create-text-btn');
+const testCreateHrefBtn = document.getElementById('test-create-href-btn');
+const testChangeTextBtn = document.getElementById('test-change-text-btn');
+const testChangeHrefBtn = document.getElementById('test-change-href-btn');
+const testCheckTextBtn = document.getElementById('test-check-text-btn');
+const testCheckHrefBtn = document.getElementById('test-check-href-btn');
 const testClearBtn = document.getElementById('test-clear-btn');
 const testStatus = document.getElementById('test-status');
-const testDetail = document.getElementById('test-detail');
+const testTextDetail = document.getElementById('test-text-detail');
+const testHrefDetail = document.getElementById('test-href-detail');
 
 function showTestStatus(text, isError) {
   if (!testStatus) return;
   testStatus.textContent = text;
-  testStatus.classList.remove('hidden', 'error');
-  if (isError) testStatus.classList.add('error');
+  testStatus.classList.remove('hidden');
   testStatus.classList.toggle('error', !!isError);
 }
 function hideTestStatus(){ if(testStatus) testStatus.classList.add('hidden'); }
 
-async function refreshTestDetail(){
-  if (!testDetail) return;
+async function refreshTestDetails(){
   try {
     const res = await chrome.runtime.sendMessage({ type: 'test-get-status' });
-    if (!res || !res.ok) { testDetail.classList.add('hidden'); return; }
-    const m = res.testMonitor;
-    const cur = res.cur;
-    if (!m) {
-      testDetail.textContent = '当前值: ' + cur + '\n测试监控: 未创建（点“创建测试监控”）';
-    } else {
-      const last = m.lastValue || '(空)';
-      testDetail.textContent = '当前值: ' + cur + '\n监控记录值: ' + last + '\n' + (cur !== last ? '● 下次检查将判定为“已变化”' : '○ 当前与记录一致，下次检查为“无变化”') + '\n上次检查: ' + (m.lastCheck || '从未') + '\n监控名: ' + (m.name||'') + ' · 间隔 ' + (m.interval||1) + ' 分钟';
+    if (!res || !res.ok) return;
+    const curText = res.curText || res.cur;
+    const curHref = res.curHref;
+    const textMon = res.textMonitor;
+    const hrefMon = res.hrefMonitor;
+    if (testTextDetail) {
+      if (!textMon) testTextDetail.textContent = '当前文本: ' + curText + '\n文本监控: 未创建（点“创建文字监控”）';
+      else {
+        const last = textMon.lastValue || '(空)';
+        testTextDetail.textContent = '当前文本: ' + curText + '\n记录值: ' + last + '\n' + (curText !== last ? '● 下次检查→已变化': '○ 一致→无变化') + '\n上次: ' + (textMon.lastCheck || '从未') + ' · ' + (textMon.interval||1) + '分钟';
+      }
+      testTextDetail.classList.remove('hidden');
     }
-    testDetail.classList.remove('hidden');
-  } catch(e){ testDetail.classList.add('hidden'); }
+    if (testHrefDetail) {
+      if (!hrefMon) testHrefDetail.textContent = '当前链接: ' + curHref + '\n链接监控: 未创建（点“创建链接监控”）';
+      else {
+        const last = hrefMon.lastValue || '(空)';
+        testHrefDetail.textContent = '当前链接: ' + curHref + '\n记录值: ' + last + '\n' + (curHref !== last ? '● 下次检查→已变化': '○ 一致→无变化') + '\n上次: ' + (hrefMon.lastCheck || '从未') + ' · ' + (hrefMon.interval||1) + '分钟';
+      }
+      testHrefDetail.classList.remove('hidden');
+    }
+  } catch(e){}
 }
 
 if (testModeToggle && testModeBody) {
   testModeToggle.addEventListener('click', () => {
     testModeBody.classList.toggle('hidden');
     if (testModeArrow) testModeArrow.classList.toggle('open', !testModeBody.classList.contains('hidden'));
-    if (!testModeBody.classList.contains('hidden')) refreshTestDetail();
+    if (!testModeBody.classList.contains('hidden')) refreshTestDetails();
   });
 }
-if (testCreateBtn) {
-  testCreateBtn.addEventListener('click', async () => {
-    testCreateBtn.disabled = true;
-    hideTestStatus();
-    try {
-      const res = await chrome.runtime.sendMessage({ type: 'test-create' });
-      if (res && res.ok) {
-        if (res.mode === 'exists') showTestStatus('测试监控已存在 ✓ 可直接点“模拟变化”', false);
-        else showTestStatus('测试监控已创建 ✓ 已设为 1 分钟间隔', false);
-        renderList(); renderUnread(); refreshTestDetail();
-      } else showTestStatus('创建失败: ' + ((res&&res.error)||'未知'), true);
-    } catch(e){ showTestStatus('创建失败: '+e.message, true); }
-    testCreateBtn.disabled = false;
+async function handleCreate(attr){
+  const btn = attr==='href' ? testCreateHrefBtn : testCreateTextBtn;
+  if(btn) btn.disabled=true;
+  hideTestStatus();
+  try{
+    const res = await chrome.runtime.sendMessage({ type: 'test-create', attribute: attr });
+    if(res && res.ok){
+      showTestStatus((attr==='href')?'"链接"':'"文字"'+(res.mode==='exists')?' 监控已存在 ✓':' 监控已创建 ✓ 1分钟间隔', false);
+      renderList(); renderUnread(); refreshTestDetails();
+    } else showTestStatus('创建失败: '+((res&&res.error)||'未知'), true);
+  }catch(e){ showTestStatus('创建失败: '+e.message, true); }
+  if(btn) btn.disabled=false;
+}
+async function handleSimulate(attr){
+  const btn = attr==='href' ? testChangeHrefBtn : testChangeTextBtn;
+  if(btn) btn.disabled=true;
+  try{
+    const res = await chrome.runtime.sendMessage({ type: 'test-simulate-change', attribute: attr });
+    if(res && res.ok){ showTestStatus((attr==='href')?'已模拟链接变化: ':'已模拟文字变化: ' + res.prev + ' → ' + res.cur + ' ，点“立即检查”应收到通知', false); refreshTestDetails(); }
+    else showTestStatus('模拟失败', true);
+  }catch(e){ showTestStatus('模拟失败: '+e.message, true); }
+  if(btn) btn.disabled=false;
+}
+async function handleCheck(attr){
+  const btn = attr==='href' ? testCheckHrefBtn : testCheckTextBtn;
+  if(btn){ btn.disabled=true; var old=btn.textContent; btn.textContent='检查中...'; }
+  hideTestStatus();
+  try{
+    const st = await chrome.runtime.sendMessage({ type: 'test-get-status' });
+    const m = (attr==='href') ? st.hrefMonitor : st.textMonitor;
+    if(!m){ showTestStatus((attr==='href')?'请先创建链接监控':'请先创建文字监控', true); }
+    else {
+      const res = await chrome.runtime.sendMessage({ type: 'check-now', id: m.id });
+      if(!res || !res.ok) showTestStatus('检查失败: '+((res&&res.error)||'未知'), true);
+      else if(res.result==='changed'){ showTestStatus((attr==='href')?'🔗 链接已变化，已发通知 ✓':'📄 文字已变化，已发通知 ✓', false); renderUnread(); renderList(); }
+      else if(res.result==='unchanged') showTestStatus('暂无变化（需先点“模拟变化”）', true);
+      else showTestStatus('结果: '+res.result, res.result==='error');
+      refreshTestDetails();
+    }
+  }catch(e){ showTestStatus('检查失败: '+e.message, true); }
+  if(btn){ btn.disabled=false; btn.textContent=old; }
+}
+if(testCreateTextBtn) testCreateTextBtn.addEventListener('click', ()=>handleCreate('text'));
+if(testCreateHrefBtn) testCreateHrefBtn.addEventListener('click', ()=>handleCreate('href'));
+if(testChangeTextBtn) testChangeTextBtn.addEventListener('click', ()=>handleSimulate('text'));
+if(testChangeHrefBtn) testChangeHrefBtn.addEventListener('click', ()=>handleSimulate('href'));
+if(testCheckTextBtn) testCheckTextBtn.addEventListener('click', ()=>handleCheck('text'));
+if(testCheckHrefBtn) testCheckHrefBtn.addEventListener('click', ()=>handleCheck('href'));
+if(testClearBtn){
+  testClearBtn.addEventListener('click', async ()=>{
+    if(!confirm('清理所有测试监控和测试值？')) return;
+    try{ const res=await chrome.runtime.sendMessage({type:'test-clear'}); showTestStatus('已清理 '+(res.removed||0)+' 条测试监控', false); renderList(); refreshTestDetails(); }catch(e){ showTestStatus('清理失败: '+e.message, true); }
   });
 }
-if (testChangeBtn) {
-  testChangeBtn.addEventListener('click', async () => {
-    testChangeBtn.disabled = true;
-    try {
-      const res = await chrome.runtime.sendMessage({ type: 'test-simulate-change' });
-      if (res && res.ok) {
-        showTestStatus('已模拟变化: ' + res.prev + ' → ' + res.cur + ' ，现在点“立即检查”应收到通知', false);
-        refreshTestDetail();
-      } else showTestStatus('模拟失败', true);
-    } catch(e){ showTestStatus('模拟失败: '+e.message, true); }
-    testChangeBtn.disabled = false;
-  });
-}
-if (testCheckBtn) {
-  testCheckBtn.addEventListener('click', async () => {
-    testCheckBtn.disabled = true;
-    const old = testCheckBtn.textContent; testCheckBtn.textContent = '检查中...';
-    hideTestStatus();
-    try {
-      const st = await chrome.runtime.sendMessage({ type: 'test-get-status' });
-      const m = st && st.testMonitor;
-      if (!m) { showTestStatus('请先创建测试监控', true); }
-      else {
-        const res = await chrome.runtime.sendMessage({ type: 'check-now', id: m.id });
-        if (!res || !res.ok) showTestStatus('检查失败: ' + ((res&&res.error)||'未知'), true);
-        else if (res.result === 'changed') { showTestStatus('检测到变化，已发送通知 ✓ 去看“通知历史”', false); renderUnread(); renderList(); }
-        else if (res.result === 'unchanged') showTestStatus('暂无变化（需先点“模拟变化”）', true);
-        else showTestStatus('结果: ' + res.result, res.result==='error');
-        refreshTestDetail();
-      }
-    } catch(e){ showTestStatus('检查失败: '+e.message, true); }
-    testCheckBtn.disabled = false; testCheckBtn.textContent = old;
-  });
-}
-if (testClearBtn) {
-  testClearBtn.addEventListener('click', async () => {
-    if (!confirm('清理所有测试监控和测试值？')) return;
-    try {
-      const res = await chrome.runtime.sendMessage({ type: 'test-clear' });
-      showTestStatus('已清理 ' + (res.removed||0) + ' 条测试监控', false);
-      renderList(); refreshTestDetail();
-    } catch(e){ showTestStatus('清理失败: '+e.message, true); }
-  });
-}
-// 初始刷新一次详情（供调试）
-try { refreshTestDetail(); } catch {}
+try{ refreshTestDetails(); }catch{}
 

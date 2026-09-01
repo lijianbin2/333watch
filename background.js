@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.15 - fix picker badge garble (-> 🎯))
+ * 333 Watcher - Background Service Worker (v0.6.16 - dual test mode text+href 🎯🧪)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -11,7 +11,10 @@ const DEBUG = false; // 发布版关闭信息日志，调试时改为 true
 function dbg(...args) { if (DEBUG) console.log(...args); }
 
 const TEST_URL_PREFIX = '333-test://';
-const TEST_STORAGE_KEY = '_333_test_value';
+const TEST_STORAGE_KEY_TEXT = '_333_test_text';
+const TEST_STORAGE_KEY_HREF = '_333_test_href';
+const TEST_STORAGE_KEY_LEGACY = '_333_test_value';
+const TEST_STORAGE_KEY = TEST_STORAGE_KEY_LEGACY; // legacy compat
 const ALARM_PREFIX = 'monitor-';
 const PRUNE_ALARM = '333-prune-history';
 const _checkLock = new Set();
@@ -60,13 +63,30 @@ async function getMonitors() {
 }
 
 
-async function getTestValue() {
-  const data = await chrome.storage.sync.get(TEST_STORAGE_KEY);
-  const v = data[TEST_STORAGE_KEY];
-  return (v == null || v === '') ? '初始值 1' : String(v);
+async function getTestTextValue() {
+  const d = await chrome.storage.sync.get([TEST_STORAGE_KEY_TEXT, TEST_STORAGE_KEY_LEGACY]);
+  let v = d[TEST_STORAGE_KEY_TEXT];
+  if (v == null || v === '' ) v = d[TEST_STORAGE_KEY_LEGACY];
+  return (v == null || v === '') ? '初始文本 1' : String(v);
 }
-async function setTestValue(v) {
-  await chrome.storage.sync.set({ [TEST_STORAGE_KEY]: String(v) });
+async function getTestHrefValue() {
+  const d = await chrome.storage.sync.get(TEST_STORAGE_KEY_HREF);
+  const v = d[TEST_STORAGE_KEY_HREF];
+  return (v == null || v === '') ? 'https://example.com/file-v1.zip' : String(v);
+}
+async function getTestValue(attr) {
+  if (attr === 'href') return getTestHrefValue();
+  return getTestTextValue();
+}
+async function setTestTextValue(v) {
+  await chrome.storage.sync.set({ [TEST_STORAGE_KEY_TEXT]: String(v) });
+}
+async function setTestHrefValue(v) {
+  await chrome.storage.sync.set({ [TEST_STORAGE_KEY_HREF]: String(v) });
+}
+async function setTestValue(v, attr) {
+  if (attr === 'href') return setTestHrefValue(v);
+  return setTestTextValue(v);
 }
 
 async function saveMonitors(monitors) {
@@ -463,7 +483,7 @@ async function confirmChange(monitor, newValue) {
 }
 
 async function checkMonitor(monitor) {
-  // 🧪 测试模式：虚拟 URL 不走网络，直接对比 storage 值
+  // 🧪 测试模式：虚拟 URL 不走网络，直接按 attribute 对比 storage 值 (v0.6.16 双路)
   if (monitor.url && monitor.url.startsWith(TEST_URL_PREFIX)) {
     if (_checkLock.has(monitor.id)) { dbg('[333 Watcher] check skipped (in-flight test):', monitor.id); return 'locked'; }
     _checkLock.add(monitor.id);
@@ -471,7 +491,8 @@ async function checkMonitor(monitor) {
       const checkedAt = new Date().toISOString();
       const alive = await getMonitors();
       if (!alive.some((m) => m.id === monitor.id)) return 'deleted';
-      const cur = await getTestValue();
+      const attr = monitor.attribute === 'href' ? 'href' : 'text';
+      const cur = await getTestValue(attr);
       const last = (monitor.lastValue == null ? null : String(monitor.lastValue));
       const changed = last !== null && cur !== last;
       const list = await getMonitors();
@@ -714,40 +735,60 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'test-get-status') {
     (async () => {
       const monitors = await getMonitors();
-      const testMonitor = monitors.find((m) => m.url && m.url.startsWith(TEST_URL_PREFIX));
-      const cur = await getTestValue();
-      sendResponse({ ok: true, cur, testMonitor: testMonitor || null });
+      const curText = await getTestTextValue();
+      const curHref = await getTestHrefValue();
+      const textMonitor = monitors.find((m) => m.url === TEST_URL_PREFIX + 'text') || monitors.find((m) => m.url === TEST_URL_PREFIX + 'demo' && m.attribute !== 'href') || null;
+      const hrefMonitor = monitors.find((m) => m.url === TEST_URL_PREFIX + 'link') || monitors.find((m) => m.url === TEST_URL_PREFIX + 'demo' && m.attribute === 'href') || null;
+      const testMonitor = textMonitor || hrefMonitor;
+      sendResponse({ ok: true, cur: curText, curText, curHref, textMonitor, hrefMonitor, testMonitor });
     })();
     return true;
   }
 
   if (msg.type === 'test-simulate-change') {
     (async () => {
-      const cur = await getTestValue();
-      const next = '模拟值 ' + Date.now().toString().slice(-6) + ' (' + new Date().toLocaleTimeString() + ')';
-      await setTestValue(next);
-      sendResponse({ ok: true, prev: cur, cur: next });
+      const attr = msg.attribute === 'href' ? 'href' : 'text';
+      if (attr === 'href') {
+        const cur = await getTestHrefValue();
+        let ver = 1;
+        const mm = cur.match(/file-v([0-9]+).zip/i);
+        if (mm) ver = parseInt(mm[1],10) + 1;
+        else ver = Math.floor(Date.now()/1000)%100 + 2;
+        const next = 'https://example.com/file-v' + ver + '.zip';
+        await setTestHrefValue(next);
+        sendResponse({ ok: true, attribute: attr, prev: cur, cur: next });
+      } else {
+        const cur = await getTestTextValue();
+        const next = '模拟文本 ' + Date.now().toString().slice(-6) + ' (' + new Date().toLocaleTimeString() + ')';
+        await setTestTextValue(next);
+        sendResponse({ ok: true, attribute: attr, prev: cur, cur: next });
+      }
     })();
     return true;
   }
 
   if (msg.type === 'test-create') {
     (async () => {
-      const cur = await getTestValue();
+      const attr = msg.attribute === 'href' ? 'href' : 'text';
+      const isHref = attr === 'href';
+      const targetUrl = isHref ? TEST_URL_PREFIX + 'link' : TEST_URL_PREFIX + 'text';
+      const legacyUrl = TEST_URL_PREFIX + 'demo';
       const monitors = await getMonitors();
-      let m = monitors.find((x) => x.url === TEST_URL_PREFIX + 'demo');
+      let m = monitors.find((x) => x.url === targetUrl);
+      if (!m) m = monitors.find((x) => x.url === legacyUrl && (x.attribute||'text') === attr);
       if (m) {
-        sendResponse({ ok: true, mode: 'exists', id: m.id });
+        sendResponse({ ok: true, mode: 'exists', id: m.id, attribute: attr });
         return;
       }
+      const cur = await getTestValue(attr);
       const monitor = {
         id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-        name: '\U0001f9ea 测试监控',
-        url: TEST_URL_PREFIX + 'demo',
+        name: isHref ? '🔍 测试监控-链接' : '📄 测试监控-文字',
+        url: targetUrl,
         interval: 1,
         type: 'element',
-        selector: '#test',
-        attribute: 'text',
+        selector: isHref ? 'a#test-link' : '#test-value',
+        attribute: attr,
         lastValue: cur,
         createdAt: new Date().toISOString(),
         updatedAt: Date.now(),
@@ -759,7 +800,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       monitors.push(monitor);
       await saveMonitors(monitors);
       await chrome.alarms.create(ALARM_PREFIX + monitor.id, { delayInMinutes: 0.2, periodInMinutes: 1 });
-      sendResponse({ ok: true, mode: 'added', id: monitor.id });
+      sendResponse({ ok: true, mode: 'added', id: monitor.id, attribute: attr });
     })();
     return true;
   }
@@ -770,8 +811,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const kept = monitors.filter((m) => !(m.url && m.url.startsWith(TEST_URL_PREFIX)));
       const removed = monitors.length - kept.length;
       await saveMonitors(kept);
-      for (const m of monitors) if (m.url && m.url.startsWith(TEST_URL_PREFIX)) try { await chrome.alarms.clear(ALARM_PREFIX + m.id); } catch {}
-      await chrome.storage.sync.remove(TEST_STORAGE_KEY);
+      for (const mm of monitors) if (mm.url && mm.url.startsWith(TEST_URL_PREFIX)) try { await chrome.alarms.clear(ALARM_PREFIX + mm.id); } catch {}
+      await chrome.storage.sync.remove([TEST_STORAGE_KEY_TEXT, TEST_STORAGE_KEY_HREF, TEST_STORAGE_KEY_LEGACY]);
       sendResponse({ ok: true, removed });
     })();
     return true;

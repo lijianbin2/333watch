@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "333 Watcher",
-  "version": "0.6.15",
-  "description": "Monitor website changes and notify updates (add test mode for verifying monitoring, v0.6.15)",
+  "version": "0.6.16",
+  "description": "Monitor website changes and notify updates (dual text/href test mode, v0.6.16)",
   "action": {
     "default_popup": "add-monitor.html",
     "default_title": "333 Watcher"

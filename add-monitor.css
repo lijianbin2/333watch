@@ -780,4 +780,15 @@ body {
 .test-detail { font-size: 11px; color: #8b949e; background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 8px 10px; white-space: pre-wrap; word-break: break-all; line-height: 1.5; }
 .test-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .test-foot .field-hint { font-size: 10px; }
+.test-subcard {
+  background: #0d1117;
+  border: 1px solid #21262d;
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.test-sub-title { font-size: 12px; font-weight: 600; color: #e6edf3; display:flex; align-items:center; gap:6px; }
+.test-sub-attr { font-size: 10px; color: #8b949e; font-weight: 400; }
 
