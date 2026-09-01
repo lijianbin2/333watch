@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.3 - json support)
+ * 333 Watcher - Background Service Worker (v0.6.9 - fix wechat nightly json)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -472,10 +472,17 @@ async function checkMonitor(monitor) {
   let wechatJsonText = null;
   try {
     if (isWechatDownload) {
-      try {
-        const jres = await fetch('https://devtools.wxqcloud.qq.com.cn/WechatWebDev/release/config.json', { cache: 'no-store' });
-        if (jres.ok) wechatJsonText = await jres.text();
-      } catch {}
+      const jsonUrls = [
+        'https://devtools.wxqcloud.qq.com.cn/WechatWebDev/nightly/versions/config.json',
+        'https://devtools.wxqcloud.qq.com.cn/WechatWebDev/release/config.json'
+      ];
+      for (const jurl of jsonUrls) {
+        try {
+          const jres = await fetch(jurl, { cache: 'no-store' });
+          if (jres.ok) { wechatJsonText = await jres.text(); dbg('[333 Watcher] wechat json fetched', jurl); break; }
+        } catch {}
+      }
+      if (!wechatJsonText) dbg('[333 Watcher] wechat json fetch failed, fallback to html');
     }
     const res = await fetch(monitor.url, { cache: 'no-store' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
