@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - 元素选择器 Content Script v0.6.14
+ * 333 Watcher - 元素选择器 Content Script v0.6.15
  * 修复：微信文档等 Vue 页面选不到的问题
  */
 (function () {

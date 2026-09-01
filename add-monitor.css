@@ -747,3 +747,37 @@ body {
 
 .watcher-error { font-size: 11px; color: #f85149; margin-top: 4px; line-height: 1.4; }
 .watcher-time { font-size: 11px; color: #8b949e; margin-top: 2px; line-height: 1.4; }
+
+/* 🧪 测试模式 */
+.test-mode-card {
+  background: #161b22;
+  border: 1px dashed #30363d;
+  border-radius: 10px;
+  overflow: hidden;
+}
+.test-mode-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: #e6edf3;
+  text-align: left;
+}
+.test-mode-title { font-size: 13px; font-weight: 600; }
+.test-mode-sub { font-size: 11px; color: #8b949e; }
+.test-mode-arrow { margin-left: auto; font-size: 12px; color: #8b949e; transition: transform 0.15s; }
+.test-mode-arrow.open { transform: rotate(90deg); }
+.test-mode-body { padding: 0 12px 12px; display: flex; flex-direction: column; gap: 10px; }
+.test-hint { font-size: 11px; color: #8b949e; line-height: 1.5; }
+.test-actions { display: flex; flex-direction: column; gap: 8px; }
+.test-row { display: flex; gap: 8px; }
+.test-status { font-size: 12px; padding: 8px 10px; border-radius: 6px; background: rgba(63,185,80,0.1); border: 1px solid rgba(63,185,80,0.35); color: #3fb950; }
+.test-status.error { background: rgba(248,81,73,0.08); border-color: rgba(248,81,73,0.35); color: #f85149; }
+.test-detail { font-size: 11px; color: #8b949e; background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 8px 10px; white-space: pre-wrap; word-break: break-all; line-height: 1.5; }
+.test-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.test-foot .field-hint { font-size: 10px; }
+

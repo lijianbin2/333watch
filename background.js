@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.14 - fix picker badge garble (-> 🎯))
+ * 333 Watcher - Background Service Worker (v0.6.15 - fix picker badge garble (-> 🎯))
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -10,6 +10,8 @@
 const DEBUG = false; // 发布版关闭信息日志，调试时改为 true
 function dbg(...args) { if (DEBUG) console.log(...args); }
 
+const TEST_URL_PREFIX = '333-test://';
+const TEST_STORAGE_KEY = '_333_test_value';
 const ALARM_PREFIX = 'monitor-';
 const PRUNE_ALARM = '333-prune-history';
 const _checkLock = new Set();
@@ -55,6 +57,16 @@ function extractLinks(html, baseUrl) {
 async function getMonitors() {
   const { monitors = [] } = await chrome.storage.sync.get('monitors');
   return monitors;
+}
+
+
+async function getTestValue() {
+  const data = await chrome.storage.sync.get(TEST_STORAGE_KEY);
+  const v = data[TEST_STORAGE_KEY];
+  return (v == null || v === '') ? '初始值 1' : String(v);
+}
+async function setTestValue(v) {
+  await chrome.storage.sync.set({ [TEST_STORAGE_KEY]: String(v) });
 }
 
 async function saveMonitors(monitors) {
@@ -451,6 +463,30 @@ async function confirmChange(monitor, newValue) {
 }
 
 async function checkMonitor(monitor) {
+  // 🧪 测试模式：虚拟 URL 不走网络，直接对比 storage 值
+  if (monitor.url && monitor.url.startsWith(TEST_URL_PREFIX)) {
+    if (_checkLock.has(monitor.id)) { dbg('[333 Watcher] check skipped (in-flight test):', monitor.id); return 'locked'; }
+    _checkLock.add(monitor.id);
+    try {
+      const checkedAt = new Date().toISOString();
+      const alive = await getMonitors();
+      if (!alive.some((m) => m.id === monitor.id)) return 'deleted';
+      const cur = await getTestValue();
+      const last = (monitor.lastValue == null ? null : String(monitor.lastValue));
+      const changed = last !== null && cur !== last;
+      const list = await getMonitors();
+      const idx = list.findIndex((m) => m.id === monitor.id);
+      if (idx === -1) return 'error';
+      const nowTs = Date.now();
+      list[idx] = { ...list[idx], lastValue: cur, lastCheck: checkedAt, lastCheckTime: nowTs, nextCheckTime: nowTs + Math.max(1, Number(list[idx].interval) || 1) * 60000, lastError: '' };
+      await saveMonitors(list);
+      if (changed) {
+        await notifyChange(list[idx], { oldValue: last, newValue: cur });
+        return 'changed';
+      }
+      return 'unchanged';
+    } finally { _checkLock.delete(monitor.id); }
+  }
   if (_checkLock.has(monitor.id)) { dbg('[333 Watcher] check skipped (in-flight):', monitor.id); return 'locked'; }
   _checkLock.add(monitor.id);
   try {
@@ -671,6 +707,72 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       const result = await checkMonitor(monitor);
       sendResponse({ ok: result !== 'error', result: result });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'test-get-status') {
+    (async () => {
+      const monitors = await getMonitors();
+      const testMonitor = monitors.find((m) => m.url && m.url.startsWith(TEST_URL_PREFIX));
+      const cur = await getTestValue();
+      sendResponse({ ok: true, cur, testMonitor: testMonitor || null });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'test-simulate-change') {
+    (async () => {
+      const cur = await getTestValue();
+      const next = '模拟值 ' + Date.now().toString().slice(-6) + ' (' + new Date().toLocaleTimeString() + ')';
+      await setTestValue(next);
+      sendResponse({ ok: true, prev: cur, cur: next });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'test-create') {
+    (async () => {
+      const cur = await getTestValue();
+      const monitors = await getMonitors();
+      let m = monitors.find((x) => x.url === TEST_URL_PREFIX + 'demo');
+      if (m) {
+        sendResponse({ ok: true, mode: 'exists', id: m.id });
+        return;
+      }
+      const monitor = {
+        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        name: '\U0001f9ea 测试监控',
+        url: TEST_URL_PREFIX + 'demo',
+        interval: 1,
+        type: 'element',
+        selector: '#test',
+        attribute: 'text',
+        lastValue: cur,
+        createdAt: new Date().toISOString(),
+        updatedAt: Date.now(),
+        lastHash: '',
+        lastCheck: '',
+        lastCheckTime: 0,
+        nextCheckTime: 0
+      };
+      monitors.push(monitor);
+      await saveMonitors(monitors);
+      await chrome.alarms.create(ALARM_PREFIX + monitor.id, { delayInMinutes: 0.2, periodInMinutes: 1 });
+      sendResponse({ ok: true, mode: 'added', id: monitor.id });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'test-clear') {
+    (async () => {
+      const monitors = await getMonitors();
+      const kept = monitors.filter((m) => !(m.url && m.url.startsWith(TEST_URL_PREFIX)));
+      const removed = monitors.length - kept.length;
+      await saveMonitors(kept);
+      for (const m of monitors) if (m.url && m.url.startsWith(TEST_URL_PREFIX)) try { await chrome.alarms.clear(ALARM_PREFIX + m.id); } catch {}
+      await chrome.storage.sync.remove(TEST_STORAGE_KEY);
+      sendResponse({ ok: true, removed });
     })();
     return true;
   }

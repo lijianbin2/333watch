@@ -68,6 +68,30 @@
       <p id="status-msg" class="status-msg hidden"></p>
     </form>
 
+    <section id="test-mode-card" class="test-mode-card">
+      <button type="button" id="test-mode-toggle" class="test-mode-header">
+        <span class="test-mode-title">🧪 测试模式</span>
+        <span class="test-mode-sub">验证监控是否生效</span>
+        <span id="test-mode-arrow" class="test-mode-arrow">▸</span>
+      </button>
+      <div id="test-mode-body" class="test-mode-body hidden">
+        <p class="test-hint">无需真实网站。创建本地测试监控 → 点“模拟变化” → 点“立即检查” → 应收到通知并在“通知历史”出现记录。</p>
+        <div class="test-actions">
+          <button type="button" id="test-create-btn" class="btn-primary" style="font-size:12px;padding:8px 0">创建测试监控</button>
+          <div class="test-row">
+            <button type="button" id="test-change-btn" class="btn-ghost" style="flex:1">模拟变化</button>
+            <button type="button" id="test-check-btn" class="btn-ghost" style="flex:1">立即检查</button>
+          </div>
+        </div>
+        <div id="test-status" class="test-status hidden"></div>
+        <div id="test-detail" class="test-detail hidden"></div>
+        <div class="test-foot">
+          <span class="field-hint">测试 URL: <code>333-test://demo</code> · 仅本地 · 间隔 1 分钟</span>
+          <button type="button" id="test-clear-btn" class="btn-ghost-small">清理测试数据</button>
+        </div>
+      </div>
+    </section>
+
     <div id="overwrite-confirm" class="confirm-bar hidden">
       <p class="confirm-text">该网址已经存在，是否覆盖？</p>
       <div class="confirm-actions">
@@ -101,7 +125,7 @@
     </div>
 
     <footer class="footer">
-      <span id="footer-version" class="footer-version">333 Watcher v0.6.1</span>
+      <span id="footer-version" class="footer-version">333 Watcher v0.6.15</span>
       <a id="about-link" class="footer-link" href="https://github.com/lijianbin2/333watch">GitHub</a>
     </footer>
   </div>
