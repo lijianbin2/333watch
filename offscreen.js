@@ -1,4 +1,4 @@
-﻿ /**
+ /**
  * 333 Watcher - Offscreen Document (v0.6.1)
  *
  * Service Worker 无 DOM，这里负责：
@@ -9,8 +9,8 @@ function buildSelector(el) {
   // 微信下载页等 a 标签优先 returning robust attribute selector
   if (el.tagName === 'A' || (el.getAttribute && el.getAttribute('href') && el.getAttribute('href').includes('wechat_devtools'))) {
     const h = el.getAttribute('href')||'';
-    if (h.includes('wechat_devtools')) return 'a[href*=''wechat_devtools'']';
-    if (h.endsWith('.exe')) return 'a[href$=''.exe'']';
+    if (h.includes('wechat_devtools')) return 'a[href*="wechat_devtools"]';
+    if (h.endsWith('.exe')) return 'a[href$=".exe"]';
   }
   if (el.id) return '#' + el.id;
   const parts = [];

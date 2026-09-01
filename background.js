@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 333 Watcher - Background Service Worker (v0.6.3 - json support)
  *
  * 监控类型：

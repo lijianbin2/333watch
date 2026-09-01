@@ -1,6 +1,6 @@
 /**
- * 333 Watcher - ÔªËØÑ¡ÔñÆ÷ Content Script v0.6.6
- * ĞŞ¸´£ºÎ¢ĞÅÎÄµµµÈ Vue Ò³ÃæÑ¡²»µ½µÄÎÊÌâ
+ * 333 Watcher - å…ƒç´ é€‰æ‹©å™¨ Content Script v0.6.6
+ * ä¿®å¤ï¼šå¾®ä¿¡æ–‡æ¡£ç­‰ Vue é¡µé¢é€‰ä¸åˆ°çš„é—®é¢˜
  */
 (function () {
   if (window.__w333PickerActive) {
@@ -24,7 +24,7 @@
   badge = document.createElement('div');
   badge.setAttribute('data-w333','badge');
   badge.style.cssText = 'position:fixed;left:50%;top:8px;transform:translateX(-50%);z-index:2147483647;background:#0f2338;color:#fff;border:1px solid #2f81f7;border-radius:999px;padding:6px 14px;font:12px/1.4 sans-serif;box-shadow:0 4px 20px rgba(0,0,0,0.35);pointer-events:none;';
-  badge.textContent = '?? Ñ¡ÔñÄ£Ê½£ºÒÆ¶¯¸ßÁÁ ¡¤ µã»÷Ñ¡ÖĞ ¡¤ Esc ÍË³ö';
+  badge.textContent = '?? é€‰æ‹©æ¨¡å¼ï¼šç§»åŠ¨é«˜äº® Â· ç‚¹å‡»é€‰ä¸­ Â· Esc é€€å‡º';
 
   function appendSafe(node){
     try { (document.body || document.documentElement).appendChild(node); return true; } catch(e){ try{ document.documentElement.appendChild(node); return true; } catch(e2){ return false; } }
@@ -88,7 +88,7 @@
       if (cls) label += '.' + cls;
     }
     var txt = (el.textContent||'').replace(/\s+/g,' ').trim().slice(0,24);
-    if (txt) label += ' \ + txt + \';
+    if (txt) label += ' Â· ' + txt + ' ';
     tip.textContent = label;
     tip.style.left = Math.min(window.innerWidth - tip.offsetWidth - 8, Math.max(0, r.left)) + 'px';
     tip.style.top = Math.max(0, r.top - 26) + 'px';
@@ -182,7 +182,7 @@
     pollTimer = setInterval(pollHighlight, 120);
   }
 
-  function attributeLabel(attr){ if(attr==='href')return'Á´½ÓµØÖ·'; if(attr==='src')return'Í¼Æ¬µØÖ·'; return'ÎÄ×ÖÄÚÈİ'; }
+  function attributeLabel(attr){ if(attr==='href')return'é“¾æ¥åœ°å€'; if(attr==='src')return'å›¾ç‰‡åœ°å€'; return'æ–‡å­—å†…å®¹'; }
   function attributeValue(pick,attr){ if(attr==='href')return pick.href||''; if(attr==='src')return pick.src||''; return pick.text||''; }
 
   var DIALOG_CSS='.w333-backdrop{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(3,9,18,0.62);font-family:\Segoe UI\,system-ui,-apple-system,sans-serif;z-index:2147483647;}'
@@ -202,21 +202,21 @@
     var style = document.createElement('style'); style.textContent = DIALOG_CSS;
     var backdrop = document.createElement('div'); backdrop.className='w333-backdrop';
     var card = document.createElement('div'); card.className='w333-card';
-    var head = document.createElement('div'); head.className='w333-head'; head.textContent='ÒÑÑ¡ÔñÔªËØ';
+    var head = document.createElement('div'); head.className='w333-head'; head.textContent='å·²é€‰æ‹©å…ƒç´ ';
     var elBox = document.createElement('div'); elBox.className='w333-element';
     var attr = ['href','src'].indexOf(pickResult.attribute)!==-1 ? pickResult.attribute : 'text';
     var sample = attributeValue(pickResult, attr);
-    elBox.textContent = pickResult.tagName + ' ¡¤ ' + attributeLabel(attr) + (sample ? ' ¡¤ ' + sample.slice(0,40) : ''); elBox.title = pickResult.selector||'';
-    var typeLabel = document.createElement('div'); typeLabel.className='w333-label'; typeLabel.textContent='Ñ¡Ôñ¼à¿ØÀàĞÍ';
+    elBox.textContent = pickResult.tagName + ' Â· ' + attributeLabel(attr) + (sample ? ' Â· ' + sample.slice(0,40) : ''); elBox.title = pickResult.selector||'';
+    var typeLabel = document.createElement('div'); typeLabel.className='w333-label'; typeLabel.textContent='é€‰æ‹©ç›‘æ§ç±»å‹';
     var options = document.createElement('div'); options.className='w333-options';
-    [['text','ÎÄ×Ö±ä»¯'],['href','Á´½ÓµØÖ·±ä»¯'],['src','Í¼Æ¬µØÖ·±ä»¯']].forEach(function(pair){
+    [['text','æ–‡å­—å˜åŒ–'],['href','é“¾æ¥åœ°å€å˜åŒ–'],['src','å›¾ç‰‡åœ°å€å˜åŒ–']].forEach(function(pair){
       var lab=document.createElement('label'); lab.className='w333-option';
       var input=document.createElement('input'); input.type='radio'; input.name='w333-attr'; input.value=pair[0]; input.checked=(attr===pair[0]);
       var span=document.createElement('span'); span.textContent=pair[1]; lab.appendChild(input); lab.appendChild(span); options.appendChild(lab);
     });
     var actions=document.createElement('div'); actions.className='w333-actions';
-    var saveBtn=document.createElement('button'); saveBtn.type='button'; saveBtn.className='w333-btn w333-primary'; saveBtn.textContent='±£´æ¼à¿Ø';
-    var reselectBtn=document.createElement('button'); reselectBtn.type='button'; reselectBtn.className='w333-btn w333-ghost'; reselectBtn.textContent='ÖØĞÂÑ¡Ôñ';
+    var saveBtn=document.createElement('button'); saveBtn.type='button'; saveBtn.className='w333-btn w333-primary'; saveBtn.textContent='ä¿å­˜ç›‘æ§';
+    var reselectBtn=document.createElement('button'); reselectBtn.type='button'; reselectBtn.className='w333-btn w333-ghost'; reselectBtn.textContent='é‡æ–°é€‰æ‹©';
     actions.appendChild(saveBtn); actions.appendChild(reselectBtn);
     var msg=document.createElement('div'); msg.className='w333-msg';
     card.appendChild(head); card.appendChild(elBox); card.appendChild(typeLabel); card.appendChild(options); card.appendChild(actions); card.appendChild(msg);
@@ -233,9 +233,9 @@
     var attribute = checked ? checked.value : 'text';
     saveBtn.disabled=true; msgEl.textContent=''; msgEl.classList.remove('error');
     chrome.runtime.sendMessage({type:'save-element-monitor', pick: pickResult, attribute: attribute}).then(function(res){
-      if(res && res.ok){ try{ chrome.storage.sync.remove('pendingPick'); }catch(e){} showToast(res.mode==='updated' ? 'ÒÑ¸üĞÂ¼à¿Ø' : 'ÒÑÌí¼Ó¼à¿Ø'); cleanup(); }
-      else { msgEl.textContent=(res&&res.error)||'±£´æÊ§°Ü£¬ÇëÖØÊÔ'; msgEl.classList.add('error'); saveBtn.disabled=false; }
-    }).catch(function(err){ console.error('[333 Watcher] save picked failed',err); msgEl.textContent='±£´æÊ§°Ü£º'+(err.message||'Î´Öª´íÎó'); msgEl.classList.add('error'); saveBtn.disabled=false; });
+      if(res && res.ok){ try{ chrome.storage.sync.remove('pendingPick'); }catch(e){} showToast(res.mode==='updated' ? 'å·²æ›´æ–°ç›‘æ§' : 'å·²æ·»åŠ ç›‘æ§'); cleanup(); }
+      else { msgEl.textContent=(res&&res.error)||'ä¿å­˜å¤±è´¥ï¼Œè¯·é‡è¯•'; msgEl.classList.add('error'); saveBtn.disabled=false; }
+    }).catch(function(err){ console.error('[333 Watcher] save picked failed',err); msgEl.textContent='ä¿å­˜å¤±è´¥ï¼š'+(err.message||'æœªçŸ¥é”™è¯¯'); msgEl.classList.add('error'); saveBtn.disabled=false; });
   }
 
   function showToast(text){
@@ -258,5 +258,5 @@
   chrome.runtime.onMessage.addListener(function(msg){ if(msg && msg.type==='w333-close-dialog') cleanup(); });
 
   startPickMode();
-  showToast('ÒÑ½øÈëÑ¡ÔñÄ£Ê½£ºÊó±êÒÆ¶¯¸ßÁÁ£¬µã»÷Ñ¡ÖĞ£¬Esc ÍË³ö');
+  showToast('å·²è¿›å…¥é€‰æ‹©æ¨¡å¼ï¼šé¼ æ ‡ç§»åŠ¨é«˜äº®ï¼Œç‚¹å‡»é€‰ä¸­ï¼ŒEsc é€€å‡º');
 })();
