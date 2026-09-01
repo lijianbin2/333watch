@@ -652,6 +652,16 @@ body {
   text-decoration: underline;
 }
 
+.clear-read-btn {
+  font-size: 11px;
+  color: #8b949e;
+  cursor: pointer;
+}
+.clear-read-btn:hover {
+  color: #f85149;
+  text-decoration: underline;
+}
+
 /* ===== 页脚（设置/关于） ===== */
 .footer {
   display: flex;

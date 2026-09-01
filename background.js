@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.9 - fix wechat nightly json)
+ * 333 Watcher - Background Service Worker (v0.6.10 - clear read history + auto prune)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -11,6 +11,7 @@ const DEBUG = false; // 发布版关闭信息日志，调试时改为 true
 function dbg(...args) { if (DEBUG) console.log(...args); }
 
 const ALARM_PREFIX = 'monitor-';
+const PRUNE_ALARM = '333-prune-history';
 const _checkLock = new Set();
 const DEFAULT_INTERVAL = 500;
 
@@ -686,6 +687,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === 'clear-read-history') {
+    (async () => {
+      try {
+        const result = await clearReadHistory();
+        await updateBadge();
+        sendResponse({ ok: true, ...result });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+    })();
+    return true;
+  }
+
   // 元素点选后直接在页面内保存（来自 picker.js 浮层）
   if (msg.type === 'save-element-monitor') {
     (async () => {
@@ -711,6 +725,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   await migrateData();
   await migrateHistoryToSync();
   await syncAlarms();
+  await ensurePruneAlarm();
 });
 
 chrome.runtime.onStartup.addListener(async () => {
@@ -718,6 +733,7 @@ chrome.runtime.onStartup.addListener(async () => {
   await migrateData();
   await migrateHistoryToSync();
   await syncAlarms();
+  await ensurePruneAlarm();
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -736,7 +752,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-dbg('[333 Watcher] Background service worker loaded (v0.6.1)');
+dbg('[333 Watcher] Background service worker loaded (v0.6.10)');
 
 
 
@@ -807,6 +823,36 @@ async function pruneHistory() {
   }
 }
 
+async function clearReadHistory() {
+  try {
+    const history = await getHistory();
+    if (!history.length) return { removed: 0, kept: 0 };
+    const kept = history.filter((h) => !h.read);
+    const removed = history.length - kept.length;
+    if (removed > 0) {
+      await saveHistory(kept);
+      dbg('[333 Watcher] clear read history:', removed, 'item(s)');
+    }
+    return { removed, kept: kept.length };
+  } catch (err) {
+    console.error('[333 Watcher] clear read history failed:', err);
+    return { removed: 0, kept: 0, error: err.message };
+  }
+}
+
+async function ensurePruneAlarm() {
+  try {
+    const existing = await chrome.alarms.get(PRUNE_ALARM);
+    if (!existing || existing.periodInMinutes !== 60) {
+      if (existing) await chrome.alarms.clear(PRUNE_ALARM);
+      await chrome.alarms.create(PRUNE_ALARM, { periodInMinutes: 60 });
+      dbg('[333 Watcher] prune alarm scheduled every 60 min');
+    }
+  } catch (err) {
+    console.error('[333 Watcher] ensurePruneAlarm failed:', err);
+  }
+}
+
 // 旧版本历史存在本机 storage.local，启动时一次性合并进 sync，保证换电脑后已读状态同步
 function mergeHistoryLists(...lists) {
   const byKey = new Map();
@@ -870,6 +916,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 chrome.runtime.onStartup.addListener(() => { updateBadge(); });
 chrome.runtime.onInstalled.addListener(() => { updateBadge(); });
 setTimeout(updateBadge, 0);
+setTimeout(() => { try { ensurePruneAlarm(); } catch {} }, 1000);
 
 // ================= 启动补检 =================
 // Chrome 启动时：超过 nextCheckTime 的任务立即检查（关机期间不重置计时）

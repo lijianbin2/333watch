@@ -36,6 +36,7 @@ const notifyCard = document.getElementById('notify-card');
 const notifyDot = document.getElementById('notify-dot');
 const notifySummary = document.getElementById('notify-summary');
 const markAllReadBtn = document.getElementById('mark-all-read-btn');
+const clearReadBtn = document.getElementById('clear-read-btn');
 const historyToggle = document.getElementById('history-toggle');
 const historyList = document.getElementById('history-list');
 const historyArrow = document.getElementById('history-arrow');
@@ -160,6 +161,8 @@ async function renderUnread() {
   notifyDot.classList.toggle('hidden', unread === 0);
   notifyCard.classList.toggle('has-unread', unread > 0);
   markAllReadBtn.classList.toggle('hidden', unread === 0);
+  const hasRead = history.some((h) => h.read);
+  if (clearReadBtn) clearReadBtn.classList.toggle('hidden', !hasRead);
   if (unread > 0) {
     notifySummary.textContent = unread + ' 条未读';
   } else if (history.length > 0) {
@@ -185,6 +188,18 @@ markAllReadBtn.addEventListener('click', async (e) => {
   if (historyExpanded) await renderHistoryList();
 });
 
+if (clearReadBtn) {
+  clearReadBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const history = await getHistory();
+    const readCount = history.filter((h) => h.read).length;
+    if (readCount === 0) return;
+    const ok = confirm('确定清除 ' + readCount + ' 条已读记录吗？未读记录将保留。');
+    if (!ok) return;
+    await clearReadHistory();
+  });
+}
+
 async function markHistoryItemRead(id) {
   const history = await getHistory();
   const item = history.find((h) => h.id === id);
@@ -200,6 +215,31 @@ async function markAllHistoryRead() {
   if (!history.some((h) => !h.read)) return;
   await saveHistory(history.map((h) => ({ ...h, read: true, readAt: Date.now() })));
   renderUnread();
+}
+
+async function clearReadHistory() {
+  try {
+    if (hasChromeStorage && chrome.runtime && chrome.runtime.sendMessage) {
+      try {
+        const res = await chrome.runtime.sendMessage({ type: 'clear-read-history' });
+        if (res && res.ok) {
+          renderUnread();
+          if (historyExpanded) await renderHistoryList();
+          return;
+        }
+      } catch (e) {
+        // fallback to direct storage
+      }
+    }
+    const history = await getHistory();
+    const kept = history.filter((h) => !h.read);
+    if (kept.length === history.length) return;
+    await saveHistory(kept);
+    renderUnread();
+    if (historyExpanded) await renderHistoryList();
+  } catch (err) {
+    console.error('[333 Watcher] clear read history failed:', err);
+  }
 }
 
 function formatTime(iso) {
