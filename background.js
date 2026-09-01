@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.10 - clear read history + auto prune)
+ * 333 Watcher - Background Service Worker (v0.6.11 - fix page-type not entering picker + clear read history)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -752,7 +752,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-dbg('[333 Watcher] Background service worker loaded (v0.6.10)');
+dbg('[333 Watcher] Background service worker loaded (v0.6.11)');
 
 
 

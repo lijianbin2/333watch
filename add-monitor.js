@@ -325,6 +325,14 @@ document.getElementById('about-link').addEventListener('click', (e) => {
 function syncTypeSections() {
   const t = inputType.value;
   elementSection.classList.toggle('hidden', t !== 'element');
+  if (t !== 'element') {
+    // 切到“整个网页”时，清理残留的点选状态并关闭网页上的选择浮层，避免误进选元素模式
+    pickedElement = null;
+    hidePickedInfo();
+    // 异步清理，不阻塞切换
+    clearPendingPick();
+    closePagePicker();
+  }
 }
 
 inputType.addEventListener('change', syncTypeSections);
@@ -338,6 +346,10 @@ function attributeLabel(attr) {
 
 // ---- 元素点选 ----
 pickElementBtn.addEventListener('click', async () => {
+  if (inputType.value !== 'element') {
+    showStatus('请先将监控类型切换为“指定内容变化”再选择元素', true);
+    return;
+  }
   if (!hasTabsApi || !hasScripting) {
     showStatus('本地预览模式不支持元素选择', true);
     return;
@@ -995,6 +1007,7 @@ importConfirmBtn.addEventListener('click', async () => {
   if (!hasPick) {
     fillFromActiveTab();
   }
+  syncTypeSections();
 })();
 
 
