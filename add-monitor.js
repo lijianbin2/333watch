@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.16 - text/href dual test)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.17 - text/href dual test)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -697,6 +697,30 @@ function typeLabel(m) {
   if (m.type === 'element') return '指定内容';
   return '整个网页';
 }
+function typeShortLabel(m) {
+  if (m.type === 'element') return '元素';
+  return '整页';
+}
+function formatRelativeTime(iso) {
+  if (!iso) return '';
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return '';
+  const diff = Date.now() - t;
+  const m = Math.floor(diff / 60000);
+  if (m < 1) return '刚刚';
+  if (m < 60) return m + '分前';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + '小时前';
+  const d = Math.floor(h / 24);
+  if (d < 7) return d + '天前';
+  return new Date(iso).toLocaleDateString();
+}
+function formatShortTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return '';
+  return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
+}
 
 function monitorUpdatedAt(m) {
   if (typeof m.updatedAt === 'number') return m.updatedAt;
@@ -730,32 +754,72 @@ async function renderList() {
     });
     info.appendChild(name);
 
-    const meta = document.createElement('p');
+    // —— 精简版 meta：单行展示关键信息，完整信息放 tooltip ——
+    const meta = document.createElement('div');
     meta.className = 'watcher-meta';
-    let metaText = typeLabel(m) + ' · 每 ' + m.interval + ' 分钟';
-    if (m.type === 'element' && m.attribute) {
-      metaText += ' · ' + attributeLabel(m.attribute);
-    }
+
+    const tag = document.createElement('span');
+    tag.className = 'meta-tag ' + (m.type === 'element' ? 'type-element' : 'type-page');
+    tag.textContent = typeShortLabel(m);
+    meta.appendChild(tag);
+
+    const intervalEl = document.createElement('span');
+    intervalEl.className = 'meta-time';
+    intervalEl.textContent = m.interval + 'm';
+    intervalEl.title = '每 ' + m.interval + ' 分钟检查一次';
+    meta.appendChild(intervalEl);
+
+    // 分隔点
+    const dot1 = document.createElement('span');
+    dot1.className = 'meta-dot';
+    dot1.textContent = '·';
+    meta.appendChild(dot1);
+
     if (m.type === 'element' && m.selector) {
-      metaText += ' · ' + m.selector;
+      const sel = document.createElement('span');
+      sel.className = 'meta-selector';
+      // 完整选择器放 title，显示只取末尾一截避免过长
+      sel.textContent = m.selector;
+      sel.title = m.selector + (m.attribute ? ' [' + m.attribute + ']' : '');
+      meta.appendChild(sel);
+      const dot2 = document.createElement('span');
+      dot2.className = 'meta-dot';
+      dot2.textContent = '·';
+      meta.appendChild(dot2);
     }
-    meta.textContent = metaText;
-    meta.title = m.selector || '';
-    info.appendChild(meta);
 
     if (m.lastError) {
-      const errEl = document.createElement('p');
-      errEl.className = 'watcher-error';
-      errEl.textContent = '⚠ 上次检查失败：' + m.lastError;
-      errEl.title = m.lastError;
-      info.appendChild(errEl);
+      const err = document.createElement('span');
+      err.className = 'meta-time has-error';
+      err.textContent = '检查失败';
+      err.title = m.lastError;
+      meta.appendChild(err);
     } else if (m.lastCheck) {
-      const timeEl = document.createElement('p');
-      timeEl.className = 'watcher-time';
-      const d = new Date(m.lastCheck);
-      timeEl.textContent = '上次检查：' + d.toLocaleString() + (m.nextCheckTime ? ' · 下次：' + new Date(m.nextCheckTime).toLocaleString() : '');
-      info.appendChild(timeEl);
+      const t = document.createElement('span');
+      t.className = 'meta-time';
+      const rel = formatRelativeTime(m.lastCheck);
+      t.textContent = rel || formatShortTime(m.lastCheck);
+      // tooltip 显示完整时间 + 下次时间
+      let tip = '上次：' + new Date(m.lastCheck).toLocaleString();
+      if (m.nextCheckTime) tip += '\n下次：' + new Date(m.nextCheckTime).toLocaleString();
+      t.title = tip;
+      meta.appendChild(t);
+    } else {
+      const t = document.createElement('span');
+      t.className = 'meta-time';
+      t.textContent = '未检查';
+      meta.appendChild(t);
     }
+
+    // 完整详情 tooltip 放在整行
+    let metaTip = typeLabel(m) + ' · 每' + m.interval + '分钟';
+    if (m.type === 'element' && m.selector) metaTip += '\n选择器：' + m.selector;
+    if (m.lastCheck) {
+      metaTip += '\n上次：' + new Date(m.lastCheck).toLocaleString();
+      if (m.nextCheckTime) metaTip += '\n下次：' + new Date(m.nextCheckTime).toLocaleString();
+    }
+    meta.title = metaTip;
+    info.appendChild(meta);
 
     const feedback = document.createElement('p');
     feedback.className = 'watcher-feedback hidden';
@@ -1025,7 +1089,7 @@ importConfirmBtn.addEventListener('click', async () => {
   }
   syncTypeSections();
 })();
-// ================= 🧪 测试模式 (v0.6.16 text/href 双路) =================
+// ================= 🧪 测试模式 (v0.6.17 text/href 双路) =================
 const TEST_URL_TEXT = '333-test://text';
 const TEST_URL_HREF = '333-test://link';
 const testModeToggle = document.getElementById('test-mode-toggle');

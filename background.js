@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.16 - dual test mode text+href 🎯🧪)
+ * 333 Watcher - Background Service Worker (v0.6.17 - dual test mode text+href 🎯🧪)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -483,7 +483,7 @@ async function confirmChange(monitor, newValue) {
 }
 
 async function checkMonitor(monitor) {
-  // 🧪 测试模式：虚拟 URL 不走网络，直接按 attribute 对比 storage 值 (v0.6.16 双路)
+  // 🧪 测试模式：虚拟 URL 不走网络，直接按 attribute 对比 storage 值 (v0.6.17 双路)
   if (monitor.url && monitor.url.startsWith(TEST_URL_PREFIX)) {
     if (_checkLock.has(monitor.id)) { dbg('[333 Watcher] check skipped (in-flight test):', monitor.id); return 'locked'; }
     _checkLock.add(monitor.id);
