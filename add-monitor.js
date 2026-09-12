@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.17 - text/href dual test)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.18 - invalid-target notify)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -58,6 +58,7 @@ const hasChromeStorage = typeof chrome !== 'undefined' && chrome.storage && chro
 const hasTabsApi = typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query;
 const hasScripting = typeof chrome !== 'undefined' && chrome.scripting && chrome.scripting.executeScript;
 const DEFAULT_INTERVAL = 500;
+const INVALID_THRESHOLD = 2;
 
 // ---- 状态 ----
 let editingId = null;
@@ -788,11 +789,21 @@ async function renderList() {
       meta.appendChild(dot2);
     }
 
-    if (m.lastError) {
+    if (m.invalid) {
+      const inv = document.createElement('span');
+      inv.className = 'meta-time has-invalid';
+      inv.textContent = '已失效';
+      let invTip = m.invalidReason || '监控目标已失效';
+      if (m.invalidSince) { try { invTip += '\n自：' + new Date(m.invalidSince).toLocaleString(); } catch (e2) {} }
+      invTip += '\n请检查网址或重新拾取元素；恢复正常会自动通知';
+      inv.title = invTip;
+      meta.appendChild(inv);
+    } else if (m.lastError) {
       const err = document.createElement('span');
       err.className = 'meta-time has-error';
-      err.textContent = '检查失败';
-      err.title = m.lastError;
+      const fc = Number(m.failCount) || 0;
+      err.textContent = fc > 0 ? '检查失败x' + fc : '检查失败';
+      err.title = m.lastError + (fc > 0 ? '\n连续失败 ' + fc + ' 次，达到 ' + INVALID_THRESHOLD + ' 次将通知失效' : '');
       meta.appendChild(err);
     } else if (m.lastCheck) {
       const t = document.createElement('span');
@@ -877,9 +888,10 @@ async function checkNow(id, btn, feedback) {
       renderUnread();
       renderList();
     } else if (res.result === 'not-found') {
-      showCheckFeedback(feedback, '未找到目标元素，页面结构可能已变化（已尝试自愈）', true);
+      showCheckFeedback(feedback, '未找到目标（已尝试自愈）；连续2次失败将通知失效', true);
+      renderList();
     } else if (res.result === 'error') {
-      showCheckFeedback(feedback, '网络请求失败，请检查网址或网络', true);
+      showCheckFeedback(feedback, '网络请求失败，请检查网址或网络；连续2次失败将通知失效', true);
       renderList();
     } else if (res.result === 'flaky') {
       showCheckFeedback(feedback, '检测到抖动，已抑制通知（下次再确认）', false);

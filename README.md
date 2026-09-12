@@ -2,7 +2,7 @@
 
 一个轻量、隐私优先的 Chrome 网页变化监控插件 — 整页 / 指定元素 (`text` / `href`) 定时检查，变化即通知。
 
-> 商店：`gaakbhfclmmeholfdahnpkocdipijndo` · 源码：https://github.com/lijianbin2/333watch · 当前版本 **v0.6.17** (线上 PUBLISHED 0.6.16，0.6.17 PENDING_REVIEW)
+> 商店：`gaakbhfclmmeholfdahnpkocdipijndo` · 源码：https://github.com/lijianbin2/333watch · 当前版本 **v0.6.18** (0.6.18 PENDING_REVIEW，含失效提醒)
 
 ## ✨ 功能
 
@@ -12,13 +12,14 @@
 - **通知**：`chrome.notifications` + 弹窗内小红点/横幅，未读可一键已读 / 清除已读（已读 7 天自动裁剪）
 - **紧凑卡片** (v0.6.17)：单行 pill + 500m + 160px 等宽 selector + 相对时间，`watcher-time` 已隐藏，信息密度提升 ~35%
 - **🧪 测试模式** (v0.6.16/0.6.17)：虚拟 `333-test://demo`，`text` / `href` 双路独立模拟变化 + 立即检查，零成本验证通知链路
+- **🚨 失效提醒** (v0.6.18)：连续 2 次检查失败（网络/HTTP 错误，或元素·链接目标消失且自愈失败）自动发“监控失效”通知，列表标红 `已失效` 徽标并记原因；恢复正常再通知一次
 - **同步**：`chrome.storage.sync` 配置与通知已读状态随 Google 账号多设备同步
 - **管理**：立即检查、编辑/删除、批量间隔、历史折叠、全部已读
 
 ## 📦 安装
 
 **商店安装（推荐）**
-> 审核中 v0.6.17，通过后自动更新。当前商店最新 PUBLISHED 为 v0.6.16
+> 审核中 v0.6.18，通过后自动更新
 
 **开发者模式**
 1. 打开 `chrome://extensions/` → 开启「开发者模式」
@@ -45,10 +46,11 @@ node "H:/Codex/chrome网页监视插件/publish-cws.mjs"
 #       POST /v2/...:publish  |  查询：GET ...:fetchStatus
 ```
 
-打包产物：`H:/Codex/chrome网页监视插件/333-watcher-0.6.17.zip`
+打包产物：`H:/Codex/chrome网页监视插件/333-watcher-0.6.18.zip`
 
 ## 📝 更新日志
 
+- **v0.6.18** `invalid-target notify` — 失效提醒：连续失败 2 次通知失效（error/not-found 通用计数），`已失效` 红徽标 + `检查失败xN`，恢复通知
 - **v0.6.17** `compact monitor cards` — 单行紧凑布局，隐藏冗余时间行，版本号全量同步
 - **v0.6.16** `dual test mode` — `text`/`href` 双路测试，分离模拟 + 立即检查
 - **v0.6.15** 测试模式（虚拟 URL + 模拟变更 + 立即检查）

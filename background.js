@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.17 - dual test mode text+href 🎯🧪)
+ * 333 Watcher - Background Service Worker (v0.6.18 - invalid-target notify 🎯🧪)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -19,6 +19,7 @@ const ALARM_PREFIX = 'monitor-';
 const PRUNE_ALARM = '333-prune-history';
 const _checkLock = new Set();
 const DEFAULT_INTERVAL = 500;
+const INVALID_THRESHOLD = 2;
 
 // ---------------- 工具 ----------------
 function simpleHash(str) {
@@ -499,7 +500,7 @@ async function checkMonitor(monitor) {
       const idx = list.findIndex((m) => m.id === monitor.id);
       if (idx === -1) return 'error';
       const nowTs = Date.now();
-      list[idx] = { ...list[idx], lastValue: cur, lastCheck: checkedAt, lastCheckTime: nowTs, nextCheckTime: nowTs + Math.max(1, Number(list[idx].interval) || 1) * 60000, lastError: '' };
+      list[idx] = { ...list[idx], lastValue: cur, lastCheck: checkedAt, lastCheckTime: nowTs, nextCheckTime: nowTs + Math.max(1, Number(list[idx].interval) || 1) * 60000, lastError: '', failCount: 0, invalid: false, invalidReason: '', invalidSince: null };
       await saveMonitors(list);
       if (changed) {
         await notifyChange(list[idx], { oldValue: last, newValue: cur });
@@ -547,16 +548,7 @@ async function checkMonitor(monitor) {
     html = await res.text();
   } catch (err) {
     console.error('[333 Watcher] fetch failed:', monitor.url, err.message);
-    // 记录错误到存储，供 UI 显示
-    try {
-      const list = await getMonitors();
-      const i = list.findIndex((m) => m.id === monitor.id);
-      if (i !== -1) {
-        list[i] = { ...list[i], lastError: err.message || 'fetch failed', lastCheck: checkedAt, lastCheckTime: Date.now() };
-        await saveMonitors(list);
-      }
-    } catch {}
-    return 'error';
+    return await markCheckFailure(monitor.id, checkedAt, err.message || 'fetch failed', 'error');
   }
 
   const type = monitor.type || 'page';
@@ -600,7 +592,10 @@ async function checkMonitor(monitor) {
   }
 
   if (outcome.notFound) {
-    return 'not-found';
+    const reason = type === 'element'
+      ? '页面已无此元素（选择器 ' + (monitor.selector || '(空)') + ' 自愈失败）'
+      : '页面已无此链接目标';
+    return await markCheckFailure(monitor.id, checkedAt, reason, 'not-found');
   }
 
   const monitors = await getMonitors();
@@ -608,15 +603,23 @@ async function checkMonitor(monitor) {
   if (idx === -1) return 'error';
 
   const nowTs = Date.now();
+  const wasInvalid = !!monitors[idx].invalid;
   monitors[idx] = {
     ...monitors[idx],
     ...outcome.update,
     lastCheck: checkedAt,
     lastCheckTime: nowTs,
     nextCheckTime: nowTs + Math.max(1, Number(monitors[idx].interval) || DEFAULT_INTERVAL) * 60000,
-    lastError: ''
+    lastError: '',
+    failCount: 0,
+    invalid: false,
+    invalidReason: '',
+    invalidSince: null
   };
   await saveMonitors(monitors);
+  if (wasInvalid) {
+    await notifyRecovered(monitors[idx]);
+  }
 
   if (outcome.changed) {
     const isValueType = type === 'element' || type === 'link' || type === 'download';
@@ -699,13 +702,61 @@ async function notifyChange(monitor, change) {
   return result;
 }
 
+async function notifyInvalid(monitor, reason) {
+  const name = monitor.name || monitor.url;
+  const message = '"' + name + '" 监控失效：' + reason + '\n请检查网址是否有效，或重新拾取元素';
+  const result = await sendNotification('notif-invalid-' + monitor.id, '333 Watcher · 监控失效', message);
+  if (result.ok) {
+    await addHistory({ name: name, url: monitor.url, message: message, kind: 'invalid' });
+  }
+  return result;
+}
+async function notifyRecovered(monitor) {
+  const name = monitor.name || monitor.url;
+  const message = '"' + name + '" 已恢复正常 ✓';
+  const result = await sendNotification('notif-recovered-' + monitor.id, '333 Watcher · 监控恢复', message);
+  if (result.ok) {
+    await addHistory({ name: name, url: monitor.url, message: message, kind: 'recovered' });
+  }
+  return result;
+}
+async function markCheckFailure(monitorId, checkedAt, reason, kind) {
+  try {
+    const list = await getMonitors();
+    const i = list.findIndex((m) => m.id === monitorId);
+    if (i === -1) return kind === 'not-found' ? 'not-found' : 'error';
+    const prev = list[i];
+    const failCount = (Number(prev.failCount) || 0) + 1;
+    const wasInvalid = !!prev.invalid;
+    const nowTs = Date.now();
+    const shouldInvalid = failCount >= INVALID_THRESHOLD;
+    list[i] = {
+      ...prev,
+      lastError: reason,
+      failCount: failCount,
+      lastCheck: checkedAt,
+      lastCheckTime: nowTs,
+      nextCheckTime: nowTs + Math.max(1, Number(prev.interval) || DEFAULT_INTERVAL) * 60000,
+      invalid: wasInvalid || shouldInvalid,
+      invalidReason: (wasInvalid || shouldInvalid) ? reason : (prev.invalidReason || ''),
+      invalidSince: wasInvalid ? (prev.invalidSince || checkedAt) : (shouldInvalid ? checkedAt : (prev.invalidSince || null))
+    };
+    await saveMonitors(list);
+    if (shouldInvalid && !wasInvalid) {
+      await notifyInvalid(list[i], reason + '（连续失败 ' + failCount + ' 次）');
+    }
+  } catch {}
+  return kind === 'not-found' ? 'not-found' : 'error';
+}
 chrome.notifications.onClicked.addListener(async (notifId) => {
   if (!notifId.startsWith('notif-')) return;
-  if (notifId.startsWith('notif-picked-')) {
+  if (notifId.startsWith('notif-picked-') || notifId.startsWith('notif-test-')) {
     chrome.notifications.clear(notifId);
     return;
   }
-  const monitorId = notifId.slice('notif-'.length);
+  let monitorId = notifId.slice('notif-'.length);
+  if (monitorId.startsWith('invalid-')) monitorId = monitorId.slice('invalid-'.length);
+  if (monitorId.startsWith('recovered-')) monitorId = monitorId.slice('recovered-'.length);
   const monitors = await getMonitors();
   const monitor = monitors.find((m) => m.id === monitorId);
   if (monitor) {
