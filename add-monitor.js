@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.18 - invalid-target notify)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.19 - first-check baseline)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -562,6 +562,7 @@ form.addEventListener('submit', async (e) => {
     }
     updated.targetHref = '';
     updated.targetText = '';
+    updated.baselined = false;
     monitors[idx] = updated;
     await saveMonitors(monitors);
     await closePagePicker();
@@ -601,6 +602,7 @@ async function addMonitor(data) {
     selector: data.type === 'element' ? pickedElement.selector : '',
     attribute: data.type === 'element' ? attribute : '',
     lastValue: data.type === 'element' ? attributeValue(pickedElement, attribute) : '',
+    baselined: false,
     createdAt: new Date().toISOString(),
     updatedAt: Date.now(),
     lastHash: '',
@@ -669,6 +671,7 @@ confirmOverwriteBtn.addEventListener('click', async () => {
     updated.targetHref = '';
     updated.targetText = '';
     updated.lastHash = '';
+    updated.baselined = false;
     monitors[idx] = updated;
     await saveMonitors(monitors);
     await closePagePicker();
@@ -895,6 +898,9 @@ async function checkNow(id, btn, feedback) {
       renderList();
     } else if (res.result === 'flaky') {
       showCheckFeedback(feedback, '检测到抖动，已抑制通知（下次再确认）', false);
+    } else if (res.result === 'baselined') {
+      showCheckFeedback(feedback, '首次检查：已建立基线（本次不通知）', false);
+      renderList();
     } else {
       showCheckFeedback(feedback, '暂无变化', false);
       renderList();
@@ -1195,6 +1201,7 @@ async function handleCheck(attr){
       const res = await chrome.runtime.sendMessage({ type: 'check-now', id: m.id });
       if(!res || !res.ok) showTestStatus('检查失败: '+((res&&res.error)||'未知'), true);
       else if(res.result==='changed'){ showTestStatus((attr==='href')?'🔗 链接已变化，已发通知 ✓':'📄 文字已变化，已发通知 ✓', false); renderUnread(); renderList(); }
+      else if(res.result==='baselined') showTestStatus('首次检查：已建立基线（本次不通知）', false);
       else if(res.result==='unchanged') showTestStatus('暂无变化（需先点“模拟变化”）', true);
       else showTestStatus('结果: '+res.result, res.result==='error');
       refreshTestDetails();

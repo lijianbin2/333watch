@@ -129,7 +129,7 @@
   }
 
   function elementText(el){
-    return (el.textContent||'').replace(/\s+/g,' ').trim().slice(0,120);
+    return (el.textContent||'').replace(/\s+/g,' ').trim();
   }
   function defaultAttribute(el){
     if (el.closest && el.closest('a')) return 'href';

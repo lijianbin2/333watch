@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.18 - invalid-target notify 🎯🧪)
+ * 333 Watcher - Background Service Worker (v0.6.19 - first-check baseline 🎯🧪)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -123,7 +123,8 @@ async function savePickedMonitor(pick, attribute) {
       lastHash: '',
       targetHref: '',
       targetText: '',
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
+      baselined: false
     };
     await saveMonitors(monitors);
     dbg('[333 Watcher] picked monitor updated:', monitors[idx].id);
@@ -141,6 +142,7 @@ async function savePickedMonitor(pick, attribute) {
     lastValue: lastValue,
     createdAt: new Date().toISOString(),
     updatedAt: Date.now(),
+    baselined: false,
     lastHash: '',
     lastCheck: '',
     lastCheckTime: 0,
@@ -213,7 +215,8 @@ async function migrateData() {
       lastHash: m.lastHash || '',
       lastCheck: m.lastCheck || '',
       lastCheckTime: m.lastCheckTime || 0,
-      nextCheckTime: m.nextCheckTime || 0
+      nextCheckTime: m.nextCheckTime || 0,
+      baselined: m.baselined !== false
     };
   });
 
@@ -411,6 +414,10 @@ async function checkElement(monitor, html) {
   }
 
   const lastValue = monitor.lastValue || null;
+  // 兼容旧版拾取时截断 120 字符的基线：当前值以旧基线为前缀则视为未变，直接补全基线
+  if (lastValue !== null && lastValue.length === 120 && current.startsWith(lastValue)) {
+    return { changed: false, prevValue: lastValue, update: { lastValue: current } };
+  }
   const changed = lastValue !== null && current !== lastValue;
   dbg('[333 Watcher] [element] selector:', monitor.selector);
   dbg('[333 Watcher] [element] attribute:', attribute);
@@ -500,8 +507,13 @@ async function checkMonitor(monitor) {
       const idx = list.findIndex((m) => m.id === monitor.id);
       if (idx === -1) return 'error';
       const nowTs = Date.now();
-      list[idx] = { ...list[idx], lastValue: cur, lastCheck: checkedAt, lastCheckTime: nowTs, nextCheckTime: nowTs + Math.max(1, Number(list[idx].interval) || 1) * 60000, lastError: '', failCount: 0, invalid: false, invalidReason: '', invalidSince: null };
+      const firstBaseline = monitor.baselined === false;
+      list[idx] = { ...list[idx], lastValue: cur, lastCheck: checkedAt, lastCheckTime: nowTs, nextCheckTime: nowTs + Math.max(1, Number(list[idx].interval) || 1) * 60000, lastError: '', failCount: 0, invalid: false, invalidReason: '', invalidSince: null, baselined: true };
       await saveMonitors(list);
+      if (firstBaseline) {
+        dbg('[333 Watcher] first check baselined, notification suppressed:', monitor.id);
+        return 'baselined';
+      }
       if (changed) {
         await notifyChange(list[idx], { oldValue: last, newValue: cur });
         return 'changed';
@@ -604,6 +616,7 @@ async function checkMonitor(monitor) {
 
   const nowTs = Date.now();
   const wasInvalid = !!monitors[idx].invalid;
+  const firstBaseline = monitors[idx].baselined === false;
   monitors[idx] = {
     ...monitors[idx],
     ...outcome.update,
@@ -614,11 +627,18 @@ async function checkMonitor(monitor) {
     failCount: 0,
     invalid: false,
     invalidReason: '',
-    invalidSince: null
+    invalidSince: null,
+    baselined: true
   };
   await saveMonitors(monitors);
   if (wasInvalid) {
     await notifyRecovered(monitors[idx]);
+  }
+
+  // 新建/重建监控的第一次成功检查只建立基线，不发变化通知
+  if (firstBaseline) {
+    dbg('[333 Watcher] first check baselined, notification suppressed:', monitor.id);
+    return 'baselined';
   }
 
   if (outcome.changed) {
@@ -841,6 +861,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         selector: isHref ? 'a#test-link' : '#test-value',
         attribute: attr,
         lastValue: cur,
+        baselined: false,
         createdAt: new Date().toISOString(),
         updatedAt: Date.now(),
         lastHash: '',

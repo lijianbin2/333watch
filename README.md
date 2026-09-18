@@ -2,7 +2,7 @@
 
 一个轻量、隐私优先的 Chrome 网页变化监控插件 — 整页 / 指定元素 (`text` / `href`) 定时检查，变化即通知。
 
-> 商店：`gaakbhfclmmeholfdahnpkocdipijndo` · 源码：https://github.com/lijianbin2/333watch · 当前版本 **v0.6.18** (0.6.18 PENDING_REVIEW，含失效提醒)
+> 商店：`gaakbhfclmmeholfdahnpkocdipijndo` · 源码：https://github.com/lijianbin2/333watch · 当前版本 **v0.6.19** (含首次检查基线：新建监控第一次检查只建基线不通知)
 
 ## ✨ 功能
 
@@ -19,7 +19,7 @@
 ## 📦 安装
 
 **商店安装（推荐）**
-> 审核中 v0.6.18，通过后自动更新
+> 新版 v0.6.19 待发布，通过后自动更新
 
 **开发者模式**
 1. 打开 `chrome://extensions/` → 开启「开发者模式」
@@ -46,10 +46,11 @@ node "H:/Codex/chrome网页监视插件/publish-cws.mjs"
 #       POST /v2/...:publish  |  查询：GET ...:fetchStatus
 ```
 
-打包产物：`H:/Codex/chrome网页监视插件/333-watcher-0.6.18.zip`
+打包产物：`H:/Codex/chrome网页监视插件/333-watcher-0.6.19.zip`
 
 ## 📝 更新日志
 
+- **v0.6.19** `first-check baseline` — 新建/改动监控的第一次成功检查只建立基线、不发变化通知；修复拾取文本 120 字符截断导致的首次必报；旧截断基线自动补全
 - **v0.6.18** `invalid-target notify` — 失效提醒：连续失败 2 次通知失效（error/not-found 通用计数），`已失效` 红徽标 + `检查失败xN`，恢复通知
 - **v0.6.17** `compact monitor cards` — 单行紧凑布局，隐藏冗余时间行，版本号全量同步
 - **v0.6.16** `dual test mode` — `text`/`href` 双路测试，分离模拟 + 立即检查
