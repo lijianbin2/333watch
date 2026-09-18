@@ -19,7 +19,7 @@
 ## 📦 安装
 
 **商店安装（推荐）**
-> 新版 v0.6.19 待发布，通过后自动更新
+> v0.6.19 商店包已就绪（待上传），过审后自动更新
 
 **开发者模式**
 1. 打开 `chrome://extensions/` → 开启「开发者模式」
@@ -41,6 +41,7 @@
 
 # 2. 发布（Publisher API v2，旧 v1 已停用）
 $env:ACCESS_TOKEN="ya29...."  # 或 CLIENT_ID/SECRET/REFRESH_TOKEN
+$env:ZIP_PATH="H:/Codex/chrome网页监视插件/333-watcher-0.6.19.zip"  # 脚本默认仍指向上版包，务必覆盖
 node "H:/Codex/chrome网页监视插件/publish-cws.mjs"
 # 底层：POST /upload/v2/publishers/00d922f1-2ce1-4252-9b44-a481ffe69180/items/gaakbhfclmmeholfdahnpkocdipijndo:upload
 #       POST /v2/...:publish  |  查询：GET ...:fetchStatus
