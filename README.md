@@ -1,85 +1,222 @@
 # 333 Watcher
 
-一个轻量、隐私优先的 Chrome 网页变化监控插件 — 整页 / 指定元素 (`text` / `href`) 定时检查，变化即通知。
+333 Watcher 是一个隐私优先的 Chrome 网页变化监控扩展。它可以定时检查整个网页，也可以只检查页面中的某个元素；当内容发生变化时，通过 Chrome 通知提醒你。
 
-> 商店：`gaakbhfclmmeholfdahnpkocdipijndo` · 源码：https://github.com/lijianbin2/333watch · 当前版本 **v0.6.20** (含网络/存储边界加固、多元素共存与选择器修复)
+当前版本：**v0.6.20**
 
-## ✨ 功能
+商店状态：已提交 Chrome Web Store 审核，状态为 `PENDING_REVIEW`（2026-09-24）
 
-- **两种监控**：整页 hash / 元素级（`CSS selector + text|href`，`src` 已于 v0.6.12 移除）
-- **可视化拾取**：页面内 `🎯` 拾取对话框，属性由对话框决定（已移除旧下拉框）
-- **定时检查**：`chrome.alarms`，关机不丢任务；默认 **500 分钟 ≈ 8 小时**（适合公告低频），可单条或批量改 5–60 分钟高频
-- **通知**：`chrome.notifications` + 弹窗内小红点/横幅，未读可一键已读 / 清除已读（已读 7 天自动裁剪）
-- **紧凑卡片** (v0.6.17)：单行 pill + 500m + 160px 等宽 selector + 相对时间，`watcher-time` 已隐藏，信息密度提升 ~35%
-- **🧪 测试模式** (v0.6.16/0.6.17)：虚拟 `333-test://demo`，`text` / `href` 双路独立模拟变化 + 立即检查，零成本验证通知链路
-- **🚨 失效提醒** (v0.6.18)：连续 2 次检查失败（网络/HTTP 错误，或元素·链接目标消失且自愈失败）自动发“监控失效”通知，列表标红 `已失效` 徽标并记原因；恢复正常再通知一次
-- **同步**：`chrome.storage.sync` 配置与通知已读状态随 Google 账号多设备同步
-- **管理**：立即检查、编辑/删除、批量间隔、历史折叠、全部已读
+商店扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
-## 📦 安装
+源码仓库：<https://github.com/lijianbin2/333watch>
 
-**商店安装（推荐）**
-> v0.6.20 已提交 Chrome Web Store 审核（PENDING_REVIEW，2026-09-24），审核通过后即可更新商店版本
+## 功能
 
-**开发者模式**
-1. 打开 `chrome://extensions/` → 开启「开发者模式」
-2. 「加载已解压的扩展程序」→ 选择 `333-watcher` 目录
-3. 固定到工具栏，点击图标打开
+- **整页监控**：定期抓取网页 HTML，使用内容 hash 判断页面是否发生变化。
+- **元素监控**：通过可视化拾取生成 CSS selector，监控元素的文本或链接变化。
+- **多目标共存**：同一页面可以同时监控整页、多个不同元素，以及同一 selector 的不同属性。
+- **定时检查**：使用 `chrome.alarms` 调度任务，默认间隔为 500 分钟，可在界面中调整。
+- **变化通知**：支持 Chrome 通知、未读计数、变化历史和已读管理。
+- **失效提醒**：连续检查失败或目标消失时显示失效状态，恢复后发送恢复提醒。
+- **配置同步**：监控配置和通知历史存储在 `chrome.storage.sync`，可随 Chrome 账号同步。
+- **测试模式**：使用内置的虚拟页面模拟文本或链接变化，便于验证通知链路。
+- **导入导出**：支持复制 JSON 配置到其他设备或浏览器环境。
 
-## 🏪 Chrome Web Store 说明（v0.6.20）
+## 监控类型
 
-**建议标题**：333 Watcher — 网页变化监控与通知
+| 类型 | 检查目标 | 说明 |
+| --- | --- | --- |
+| 整页 | 页面 HTML hash | 适合公告、新闻、状态页等整体内容变化 |
+| 元素文本 | CSS selector + `text` | 适合价格、库存、标题、状态文字等 |
+| 元素链接 | CSS selector + `href` | 适合下载链接、跳转地址、按钮目标等 |
 
-**简短说明**：监控网页或指定元素的变化，并在内容更新时发送通知。支持整页、文本和链接监控。
+监控目标按以下规则区分：
 
-**详细说明**：333 Watcher 是一个隐私优先的 Chrome 网页变化监控插件。它可以定时检查网页内容或指定元素的文本、链接是否发生变化，并通过 Chrome 通知及时提醒。插件支持可视化元素拾取、多个元素共存监控、失效提醒、历史记录和多设备同步。插件不上传监控数据、不包含广告或统计，仅向用户配置的网址发起检查请求。
+- 整页目标按规范化后的 URL 去重；
+- 元素目标按 URL、selector 和 attribute 组合去重；
+- 只有完全相同的目标才会更新原监控；
+- 删除一个元素不会影响同一页面的其他监控。
 
-## 🚀 快速开始
+## 安装
 
-1. 打开要监控的网页 → 点扩展图标
-2. 选类型：整页 / 指定元素 → 点 `🎯 拾取` 在页面上点选元素
-3. 改名称/间隔（默认 500m）→ 保存
-4. 可选：用 `🧪 测试模式` 发一条模拟变更，确认通知能弹出；或点单条「立即检查」
+### Chrome Web Store
 
-## 🔧 商店发布（维护者）
+在 Chrome Web Store 中搜索 **333 Watcher**，或使用扩展 ID：
 
-```powershell
-# 1. 改版后打包（已忽略 *.zip/crx/pem）
-# manifest.json / background.js / add-monitor.* 头部保持版本一致
+`gaakbhfclmmeholfdahnpkocdipijndo`
 
-# 2. 发布（Publisher API v2，旧 v1 已停用）
-$env:ACCESS_TOKEN="ya29...."  # 或 CLIENT_ID/SECRET/REFRESH_TOKEN
-$env:ZIP_PATH="H:/Codex/chrome网页监视插件/333-watcher-0.6.20.zip"  # 如使用自定义包路径可通过此变量覆盖
-node "H:/Codex/chrome网页监视插件/publish-cws.mjs"
-# 底层：POST /upload/v2/publishers/00d922f1-2ce1-4252-9b44-a481ffe69180/items/gaakbhfclmmeholfdahnpkocdipijndo:upload
-#       POST /v2/...:publish  |  查询：GET ...:fetchStatus
+### 开发者模式
+
+1. 打开 `chrome://extensions/`。
+2. 开启右上角的“开发者模式”。
+3. 点击“加载已解压的扩展程序”。
+4. 选择本仓库的 `333-watcher` 目录。
+5. 将 333 Watcher 固定到浏览器工具栏。
+
+## 使用方法
+
+### 创建监控
+
+1. 打开需要监控的网页，点击工具栏中的 333 Watcher。
+2. 选择“整页”或“指定内容”。
+3. 如果选择指定内容，点击“拾取元素”，在网页中选择目标元素。
+4. 根据需要填写名称和检查间隔。
+5. 点击“保存监控”。
+
+新建或修改监控后，第一次成功检查只建立基线，不会因为初始内容而发送变化通知。后续检查发现内容变化时才会通知。
+
+### 管理监控
+
+在扩展面板中可以：
+
+- 立即检查单条监控；
+- 编辑名称、URL、selector 和检查间隔；
+- 删除单条监控；
+- 批量更新检查间隔；
+- 展开变化历史；
+- 标记全部历史为已读；
+- 清除已读历史。
+
+### 测试通知
+
+测试模式提供独立的文本和链接模拟页面，可以在不访问真实网站的情况下验证：
+
+1. 打开扩展面板中的测试模式。
+2. 选择文本或链接测试项。
+3. 模拟一次变化并执行立即检查。
+4. 确认 Chrome 通知和未读状态正常更新。
+
+## 工作方式与边界
+
+### 页面检查
+
+整页监控会请求用户配置的 URL，移除 HTML 中的注释、脚本、样式和 `noscript` 内容后计算 hash。页面首次检查只建立基线。
+
+### 元素检查
+
+元素监控先读取页面对应的 HTML，再在受限的 DOM 环境中定位 selector，并读取文本或 `href` 属性。文本查找优先返回最深的叶子节点，避免外层容器抢占匹配结果。
+
+### 资源和安全限制
+
+- 网络请求超时：20 秒；
+- HTML 响应大小上限：2.5 MB；
+- JSON 响应大小上限：512 KB；
+- DOM 扫描上限：50,000 个节点；
+- 检查间隔范围：1–10,080 分钟；
+- 文本监控值最多保存 4,096 个字符；
+- 链接监控值最多保存 2,048 个字符；
+- 导入数据会进行结构清洗和长度限制；
+- 同步存储空间不足时，界面会显示可操作的错误提示。
+
+## 隐私
+
+333 Watcher 不包含广告、统计或第三方分析服务。
+
+- 不会把监控配置上传到本项目服务器；
+- 不会上传通知历史；
+- 仅向用户主动添加的监控 URL 发起检查请求；
+- 配置和通知历史存储在浏览器的 `chrome.storage.sync` 中；
+- 元素拾取只在用户主动操作时使用。
+
+详细说明见 [PRIVACY.md](./PRIVACY.md)。
+
+## 权限说明
+
+| 权限 | 用途 |
+| --- | --- |
+| `storage` | 保存监控配置、历史和已读状态 |
+| `notifications` | 发送变化、失效和恢复通知 |
+| `alarms` | 定时执行检查任务 |
+| `activeTab` | 在当前页面执行用户主动触发的拾取操作 |
+| `scripting` | 读取用户指定页面中的元素信息 |
+| `offscreen` | 在受限环境中解析 HTML 和定位元素 |
+| `<all_urls>` | 允许检查用户主动添加的任意 HTTP/HTTPS 网址 |
+
+## 开发
+
+### 文件结构
+
+```text
+333-watcher/
+├─ manifest.json       # Manifest V3 配置
+├─ background.js       # Service Worker、检查、通知、存储和调度
+├─ add-monitor.html    # 扩展面板
+├─ add-monitor.js      # 面板交互和监控 CRUD
+├─ add-monitor.css     # 面板样式
+├─ picker.js           # 页面元素拾取脚本
+├─ offscreen.html      # Offscreen Document 页面
+├─ offscreen.js        # HTML 解析和元素查询
+└─ icons/              # 扩展图标
 ```
 
-打包产物：`H:/Codex/chrome网页监视插件/333-watcher-0.6.20.zip`
+### 本地检查
 
-## 📝 更新日志
+在仓库根目录运行：
 
-- **v0.6.20** `hardening review` — 网络请求增加 20 秒超时与响应体大小限制；整页/元素监控按目标去重，同一页面可共存多个元素；修复 picker/offscreen 的 CSS selector 生成与特殊字符处理；增加 Chrome 同步存储配额友好提示；删除操作改为只删除单条监控；导入数据增加结构清洗与长度限制
+```powershell
+node --check background.js
+node --check add-monitor.js
+node --check picker.js
+node --check offscreen.js
+git diff --check
+```
 
-- **v0.6.19** `first-check baseline` — 新建/改动监控的第一次成功检查只建立基线、不发变化通知；修复拾取文本 120 字符截断导致的首次必报；旧截断基线自动补全
-- **v0.6.18** `invalid-target notify` — 失效提醒：连续失败 2 次通知失效（error/not-found 通用计数），`已失效` 红徽标 + `检查失败xN`，恢复通知
-- **v0.6.17** `compact monitor cards` — 单行紧凑布局，隐藏冗余时间行，版本号全量同步
-- **v0.6.16** `dual test mode` — `text`/`href` 双路测试，分离模拟 + 立即检查
-- **v0.6.15** 测试模式（虚拟 URL + 模拟变更 + 立即检查）
-- **v0.6.14** 拾取徽标 `?? → 🎯` UTF-8 修复
-- **v0.6.13** 移除监控目标下拉（属性仅由拾取对话框决定）
-- **v0.6.12** 移除 `src` 图片监控，元素模式保存按钮隐藏（对话框直接保存）
-- **v0.6.10** 一键清除已读 + 60min 自动裁剪（7d）
-- 更早见 `git log`
+### 发布前检查
 
-## 🔒 隐私
+1. 确认 `manifest.json`、页面页脚和脚本头部版本号一致。
+2. 运行 JavaScript 语法检查和 `git diff --check`。
+3. 在 Chrome 开发者模式中测试整页、元素文本和元素链接监控。
+4. 确认 ZIP 不包含 `.git`、凭据、调试文件或其他私密内容。
+5. 先上传新版本 ZIP，再提交 Chrome Web Store 审核。
 
-不采集、不上报、不含广告/统计。仅向你添加的监控网址发请求检查变化，数据存于 `chrome.storage.sync`。详见 [PRIVACY.md](./PRIVACY.md)
+### 打包与发布
 
-## 🛠 开发
+发布脚本位于仓库上级目录的 `publish-cws.mjs`。它使用 Chrome Web Store Publisher API，认证信息应通过环境变量提供，不要提交到 Git：
 
-- Manifest V3，`service_worker: background.js`，`offscreen.js` 辅助
-- 纯前端，无后端；权限 `storage/notifications/alarms/activeTab/scripting/offscreen` + `<all_urls>`
+```powershell
+$env:ACCESS_TOKEN="<access-token>"
+$env:ZIP_PATH="<path-to>/333-watcher-0.6.20.zip"
+node "<path-to>/publish-cws.mjs"
+```
 
----
-Made for 333 — 提 Issue: https://github.com/lijianbin2/333watch/issues
+如果本机使用代理，可在当前 PowerShell 会话中设置：
+
+```powershell
+$env:HTTP_PROXY="http://127.0.0.1:7890"
+$env:HTTPS_PROXY="http://127.0.0.1:7890"
+node --use-env-proxy "<path-to>/publish-cws.mjs"
+```
+
+## 更新日志
+
+### v0.6.20
+
+- 增加网络请求超时和响应大小限制；
+- 整页和元素监控按目标去重，同一页面支持多个元素共存；
+- 修复 picker 和 offscreen 的 CSS selector 生成及特殊字符处理；
+- 改进同步存储配额错误提示；
+- 删除操作改为只删除单条监控；
+- 增强导入数据清洗和长度限制；
+- 改进文本匹配和 DOM 扫描边界。
+
+### v0.6.19
+
+- 新建或修改监控的第一次成功检查只建立基线，不发送变化通知；
+- 修复首次检查因文本截断而误报的问题。
+
+### v0.6.18
+
+- 增加连续检查失败和目标失效提醒；
+- 增加失效状态徽标和恢复通知。
+
+更早的变更记录请查看 [Git 提交历史](https://github.com/lijianbin2/333watch/commits/main/)。
+
+## 贡献
+
+欢迎通过 GitHub Issue 报告问题或提出建议：
+
+<https://github.com/lijianbin2/333watch/issues>
+
+## License
+
+本项目遵循仓库中的许可协议。发布、分发或二次修改前，请先阅读对应许可文件。
