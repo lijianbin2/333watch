@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - 元素选择器 Content Script v0.6.16
+ * 333 Watcher - 元素选择器 Content Script v0.6.20
  * 修复：微信文档等 Vue 页面选不到的问题
  */
 (function () {
@@ -32,19 +32,19 @@
   appendSafe(overlay);
   appendSafe(tip);
   appendSafe(badge);
-  console.log('[333 Watcher] picker overlay injected v0.6.6', overlay, tip, badge, location.href);
+  console.log('[333 Watcher] picker overlay injected v0.6.20', overlay, tip, badge, location.href);
 
   function getSelector(el) {
     if (!el || !el.tagName) return 'body';
     if (el.tagName === 'A' || (el.closest && el.closest('a'))) {
       var a = (el.closest && el.closest('a')) || el;
       var href = (a.getAttribute && a.getAttribute('href')) || '';
-      if (href.indexOf('wechat_devtools') !== -1) return 'a[href*=\ wechat_devtools\]';
-      if (href.slice(-4) === '.exe') return 'a[href$=\.exe\]';
-      if (href) { try { var u = new URL(a.href); if (u.hostname.indexOf('wxqcloud') !== -1) return 'a[href*=\wxqcloud\]'; } catch(e){} }
+      if (href.indexOf('wechat_devtools') !== -1) return 'a[href*="wechat_devtools"]';
+      if (href.slice(-4) === '.exe') return 'a[href$=".exe"]';
+      if (href) { try { var u = new URL(a.href); if (u.hostname.indexOf('wxqcloud') !== -1) return 'a[href*="wxqcloud"]'; } catch(e){} }
     }
     if (el.id) return '#' + CSS.escape(el.id);
-    if (el.getAttribute && el.getAttribute('data-testid')) return el.tagName.toLowerCase() + '[data-testid=\ + CSS.escape(el.getAttribute(data-testid)) + \]';
+    if (el.getAttribute && el.getAttribute('data-testid')) return el.tagName.toLowerCase() + '[data-testid="' + String(el.getAttribute('data-testid')).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]';
     var parts = []; var node = el;
     while (node && node.nodeType === 1 && node.tagName !== 'HTML') {
       var part = node.tagName.toLowerCase();

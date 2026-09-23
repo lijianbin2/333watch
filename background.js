@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.19 - first-check baseline 🎯🧪)
+ * 333 Watcher - Background Service Worker (v0.6.20 - hardening review)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -20,6 +20,11 @@ const PRUNE_ALARM = '333-prune-history';
 const _checkLock = new Set();
 const DEFAULT_INTERVAL = 500;
 const INVALID_THRESHOLD = 2;
+const FETCH_TIMEOUT_MS = 20000;
+const MAX_HTML_BYTES = 2.5 * 1024 * 1024;
+const MAX_JSON_BYTES = 512 * 1024;
+const MAX_TEXT_VALUE_CHARS = 4096;
+const MAX_URL_VALUE_CHARS = 2048;
 
 // ---------------- 工具 ----------------
 function simpleHash(str) {
@@ -32,6 +37,77 @@ function simpleHash(str) {
 
 function normalizeUrl(url) {
   return (url || '').trim().replace(/\/+$/, '');
+}
+
+function monitorKey(monitor) {
+  const url = normalizeUrl(monitor && monitor.url || '');
+  const type = (monitor && monitor.type) || 'page';
+  if (type === 'page') return 'page|' + url;
+  return 'element|' + url + '|' + (monitor.selector || '') + '|' + (monitor.attribute || 'text');
+}
+
+function limitMonitorValue(value, attribute) {
+  const text = value == null ? '' : String(value);
+  const max = (attribute === 'href' || attribute === 'src') ? MAX_URL_VALUE_CHARS : MAX_TEXT_VALUE_CHARS;
+  return text.length > max ? text.slice(0, max) : text;
+}
+
+function clampInterval(value, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback || DEFAULT_INTERVAL;
+  return Math.min(10080, Math.max(1, Math.round(n)));
+}
+
+function stripHeavy(html) {
+  return String(html || '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, '');
+}
+
+async function fetchWithTimeout(url, init) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...(init || {}), signal: controller.signal });
+  } catch (err) {
+    if (err && err.name === 'AbortError') throw new Error('请求超时');
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function readResponseText(response, maxBytes) {
+  const limit = maxBytes || MAX_HTML_BYTES;
+  const declared = Number(response.headers && response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > limit) throw new Error('响应内容过大');
+  if (!response.body || typeof response.body.getReader !== 'function') {
+    const text = await response.text();
+    if (new TextEncoder().encode(text).byteLength > limit) throw new Error('响应内容过大');
+    return text;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = '';
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      total += part.value.byteLength;
+      if (total > limit) {
+        try { await reader.cancel(); } catch {}
+        throw new Error('响应内容过大');
+      }
+      text += decoder.decode(part.value, { stream: true });
+    }
+    text += decoder.decode();
+    return text;
+  } finally {
+    try { reader.releaseLock(); } catch {}
+  }
 }
 
 function stripTags(html) {
@@ -60,7 +136,7 @@ function extractLinks(html, baseUrl) {
 // ---------------- 存储（仅使用 chrome.storage.sync） ----------------
 async function getMonitors() {
   const { monitors = [] } = await chrome.storage.sync.get('monitors');
-  return monitors;
+  return Array.isArray(monitors) ? monitors : [];
 }
 
 
@@ -90,8 +166,22 @@ async function setTestValue(v, attr) {
   return setTestTextValue(v);
 }
 
+function friendlyStorageError(err) {
+  const message = String(err && err.message || err || '');
+  if (/quota|max_write|quota_bytes|storage.*full/i.test(message)) {
+    const friendly = new Error('Chrome 同步存储空间不足，请删除旧监控或减少监控内容后重试');
+    friendly.code = 'SYNC_QUOTA';
+    return friendly;
+  }
+  return err instanceof Error ? err : new Error(message || '同步存储失败');
+}
+
 async function saveMonitors(monitors) {
-  await chrome.storage.sync.set({ monitors });
+  try {
+    await chrome.storage.sync.set({ monitors });
+  } catch (err) {
+    throw friendlyStorageError(err);
+  }
 }
 
 async function savePickedMonitor(pick, attribute) {
@@ -105,8 +195,10 @@ async function savePickedMonitor(pick, attribute) {
   const attr = ['text', 'href', 'src'].includes(attribute) ? attribute : 'text';
   const name = (String(pick.text || pick.pageTitle || '指定内容').trim().slice(0, 60)) || '指定内容';
   const monitors = await getMonitors();
-  // 同一网址只允许一个监控（避免重复通知），已有则更新
-  const idx = monitors.findIndex((m) => normalizeUrl(m.url || '') === url);
+  // 同一页面可以监控多个不同元素；仅完全相同的目标才更新。
+  const candidate = { type: 'element', url, selector: pick.selector, attribute: attr };
+  const key = monitorKey(candidate);
+  const idx = monitors.findIndex((m) => monitorKey(m) === key);
 
   const lastValue = attributeValueOfPick(pick, attr);
 
@@ -155,9 +247,9 @@ async function savePickedMonitor(pick, attribute) {
 }
 
 function attributeValueOfPick(pick, attr) {
-  if (attr === 'href') return pick.href || '';
-  if (attr === 'src') return pick.src || '';
-  return pick.text || '';
+  if (attr === 'href') return limitMonitorValue(pick.href || '', attr);
+  if (attr === 'src') return limitMonitorValue(pick.src || '', attr);
+  return limitMonitorValue(pick.text || '', attr);
 }
 
 // ---------------- 数据迁移 ----------------
@@ -175,7 +267,7 @@ async function migrateData() {
           id: w.id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)),
           name: w.name || w.url,
           url: url,
-          interval: Math.max(1, Number(w.interval) || DEFAULT_INTERVAL),
+          interval: clampInterval(w.interval, DEFAULT_INTERVAL),
           type: 'page',
           createdAt: w.createdAt || new Date().toISOString()
         });
@@ -186,7 +278,7 @@ async function migrateData() {
     dbg('[333 Watcher] migrated legacy watchers -> monitors');
   }
 
-  const normalized = monitors.map((m) => {
+  const normalized = monitors.filter((m) => m && typeof m === 'object').map((m) => {
     // 兼容旧 type="link" / "download"：统一转为指定内容监控，链接地址
     if (m.type === 'link' || m.type === 'download') {
       m.type = 'element';
@@ -203,13 +295,13 @@ async function migrateData() {
       id: m.id,
       name: m.name || m.url,
       url: normalizeUrl(m.url),
-      interval: Math.max(1, Number(m.interval) || DEFAULT_INTERVAL),
+      interval: clampInterval(m.interval, DEFAULT_INTERVAL),
       type: m.type || 'page',
       selector: m.selector || '',
       attribute: m.attribute || '',
       targetHref: m.targetHref || '',
       targetText: m.targetText || '',
-      lastValue: m.lastValue || '',
+      lastValue: limitMonitorValue(m.lastValue || '', m.attribute || 'text'),
       createdAt: m.createdAt || new Date().toISOString(),
       updatedAt: m.updatedAt || 0,
       lastHash: m.lastHash || '',
@@ -220,19 +312,16 @@ async function migrateData() {
     };
   });
 
-  // 去重：同一网址只保留一个监控（保留 updatedAt 最新的），避免重复通知
-  const urlLatest = new Map();
+  // 去重：整页监控按 URL，元素监控按 URL + selector + attribute。
+  const keyLatest = new Map();
   for (const m of normalized) {
-    const key = normalizeUrl(m.url);
-    if (!key) continue;
-    const prev = urlLatest.get(key);
+    const key = monitorKey(m);
+    if (!normalizeUrl(m.url)) continue;
+    const prev = keyLatest.get(key);
     const timeOf = (x) => Number(x.updatedAt) || new Date(x.createdAt).getTime() || 0;
-    if (!prev || timeOf(m) > timeOf(prev)) urlLatest.set(key, m);
+    if (!prev || timeOf(m) > timeOf(prev)) keyLatest.set(key, m);
   }
-  const deduped = normalized.filter((m) => {
-    const key = normalizeUrl(m.url);
-    return !!key && urlLatest.get(key) === m;
-  });
+  const deduped = normalized.filter((m) => !!normalizeUrl(m.url) && keyLatest.get(monitorKey(m)) === m);
 
   if (migrated || JSON.stringify(deduped) !== JSON.stringify(monitors)) {
     await saveMonitors(deduped);
@@ -319,7 +408,7 @@ async function queryElementValue(html, selector, attribute) {
   await ensureOffscreen();
   const resp = await chrome.runtime.sendMessage({
     type: 'query-element',
-    html: html,
+    html: stripHeavy(html),
     selector: selector,
     attribute: attribute
   });
@@ -329,7 +418,7 @@ async function queryElementValue(html, selector, attribute) {
 
 // ---------------- 检测：page ----------------
 async function checkPage(monitor, html) {
-  const newHash = simpleHash(html);
+  const newHash = simpleHash(stripHeavy(html));
   const oldHash = monitor.lastHash || null;
   const changed = oldHash !== null && newHash !== oldHash;
   dbg('[333 Watcher] [page] oldHash:', oldHash, 'newHash:', newHash, 'changed:', changed);
@@ -380,8 +469,8 @@ async function checkLink(monitor, html) {
     return { changed: false, notFound: true, update: {} };
   }
 
-  const currentHref = target.href;
-  const lastValue = monitor.lastValue || null;
+  const currentHref = limitMonitorValue(target.href, 'href');
+  const lastValue = monitor.lastValue == null ? null : limitMonitorValue(monitor.lastValue, 'href');
   const changed = lastValue !== null && currentHref !== lastValue;
   dbg('[333 Watcher] [link] lastValue:', lastValue, 'currentHref:', currentHref, 'changed:', changed);
   return { changed, prevValue: lastValue, update: { lastValue: currentHref } };
@@ -413,7 +502,8 @@ async function checkElement(monitor, html) {
     } catch {}
   }
 
-  const lastValue = monitor.lastValue || null;
+  current = limitMonitorValue(current, attribute);
+  const lastValue = monitor.lastValue == null ? null : limitMonitorValue(monitor.lastValue, attribute);
   // 兼容旧版拾取时截断 120 字符的基线：当前值以旧基线为前缀则视为未变，直接补全基线
   if (lastValue !== null && lastValue.length === 120 && current.startsWith(lastValue)) {
     return { changed: false, prevValue: lastValue, update: { lastValue: current } };
@@ -434,7 +524,7 @@ async function findElementByValue(baseUrl, html, value, attribute) {
     await ensureOffscreen();
     const resp = await chrome.runtime.sendMessage({
       type: 'find-by-value',
-      html: html,
+      html: stripHeavy(html),
       baseUrl: baseUrl,
       value: value,
       attribute: attribute || 'text'
@@ -456,7 +546,7 @@ async function getCurrentValue(monitor, html) {
     if ((attribute === 'href' || attribute === 'src') && v) {
       try { v = new URL(v, monitor.url).href; } catch {}
     }
-    return { ok: true, value: v };
+    return { ok: true, value: limitMonitorValue(v, attribute) };
   }
   const links = extractLinks(html, monitor.url);
   let target = null;
@@ -467,15 +557,16 @@ async function getCurrentValue(monitor, html) {
     target = links.find((l) => normalizeUrl(l.href) === normalizeUrl(monitor.targetHref));
   }
   if (!target) return { ok: false };
-  return { ok: true, value: target.href };
+  return { ok: true, value: limitMonitorValue(target.href, 'href') };
 }
 
 // 变化二次确认：立即重新抓取一次页面，值仍为新值才判定为真实变化
 // 目的：避免 CDN/A-B 测试/缓存抖动造成的误报
 async function confirmChange(monitor, newValue) {
   try {
-    const res = await fetch(monitor.url, { cache: 'no-store' });
-    const html = await res.text();
+    const res = await fetchWithTimeout(monitor.url, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const html = await readResponseText(res, MAX_HTML_BYTES);
     const cur = await getCurrentValue(monitor, html);
     if (!cur.ok) {
       dbg('[333 Watcher] confirm: element not found on re-fetch, keep notification');
@@ -549,15 +640,15 @@ async function checkMonitor(monitor) {
       ];
       for (const jurl of jsonUrls) {
         try {
-          const jres = await fetch(jurl, { cache: 'no-store' });
-          if (jres.ok) { wechatJsonText = await jres.text(); dbg('[333 Watcher] wechat json fetched', jurl); break; }
+          const jres = await fetchWithTimeout(jurl, { cache: 'no-store' });
+          if (jres.ok) { wechatJsonText = await readResponseText(jres, MAX_JSON_BYTES); dbg('[333 Watcher] wechat json fetched', jurl); break; }
         } catch {}
       }
       if (!wechatJsonText) dbg('[333 Watcher] wechat json fetch failed, fallback to html');
     }
-    const res = await fetch(monitor.url, { cache: 'no-store' });
+    const res = await fetchWithTimeout(monitor.url, { cache: 'no-store' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
-    html = await res.text();
+    html = await readResponseText(res, MAX_HTML_BYTES);
   } catch (err) {
     console.error('[333 Watcher] fetch failed:', monitor.url, err.message);
     return await markCheckFailure(monitor.id, checkedAt, err.message || 'fetch failed', 'error');
@@ -779,7 +870,7 @@ chrome.notifications.onClicked.addListener(async (notifId) => {
   if (monitorId.startsWith('recovered-')) monitorId = monitorId.slice('recovered-'.length);
   const monitors = await getMonitors();
   const monitor = monitors.find((m) => m.id === monitorId);
-  if (monitor) {
+  if (monitor && !monitor.url.startsWith(TEST_URL_PREFIX)) {
     chrome.tabs.create({ url: monitor.url });
   }
   chrome.notifications.clear(notifId);
@@ -860,7 +951,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         type: 'element',
         selector: isHref ? 'a#test-link' : '#test-value',
         attribute: attr,
-        lastValue: cur,
+        lastValue: limitMonitorValue(cur, attr),
         baselined: false,
         createdAt: new Date().toISOString(),
         updatedAt: Date.now(),
@@ -871,7 +962,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       };
       monitors.push(monitor);
       await saveMonitors(monitors);
-      await chrome.alarms.create(ALARM_PREFIX + monitor.id, { delayInMinutes: 0.2, periodInMinutes: 1 });
+      await chrome.alarms.create(ALARM_PREFIX + monitor.id, { delayInMinutes: 0.5, periodInMinutes: 1 });
       sendResponse({ ok: true, mode: 'added', id: monitor.id, attribute: attr });
     })();
     return true;
@@ -967,7 +1058,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-dbg('[333 Watcher] Background service worker loaded (v0.6.14)');
+dbg('[333 Watcher] Background service worker loaded (v0.6.20)');
 
 
 
@@ -1143,6 +1234,7 @@ async function catchUpChecks() {
     if (next <= now) {
       dbg('[333 Watcher] catch-up check (overdue):', m.url);
       await checkMonitor(m);
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
 }

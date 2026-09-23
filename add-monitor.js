@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.19 - first-check baseline)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.20 - hardening review)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -59,6 +59,8 @@ const hasTabsApi = typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.q
 const hasScripting = typeof chrome !== 'undefined' && chrome.scripting && chrome.scripting.executeScript;
 const DEFAULT_INTERVAL = 500;
 const INVALID_THRESHOLD = 2;
+const MAX_TEXT_VALUE_CHARS = 4096;
+const MAX_URL_VALUE_CHARS = 2048;
 
 // ---- 状态 ----
 let editingId = null;
@@ -86,24 +88,88 @@ function normalizeUrl(url) {
   return (url || '').trim().replace(/\/+$/, '');
 }
 
+function monitorKey(monitor) {
+  const url = normalizeUrl(monitor && monitor.url || '');
+  const type = (monitor && monitor.type) || 'page';
+  if (type === 'page') return 'page|' + url;
+  return 'element|' + url + '|' + (monitor.selector || '') + '|' + (monitor.attribute || 'text');
+}
+
+function clampInterval(value, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback || DEFAULT_INTERVAL;
+  return Math.min(10080, Math.max(1, Math.round(n)));
+}
+
+function limitMonitorValue(value, attribute) {
+  const text = value == null ? '' : String(value);
+  const max = attribute === 'href' || attribute === 'src' ? MAX_URL_VALUE_CHARS : MAX_TEXT_VALUE_CHARS;
+  return text.length > max ? text.slice(0, max) : text;
+}
+
+function normalizeImportedMonitor(value) {
+  if (!value || typeof value !== 'object') return null;
+  const url = normalizeUrl(value.url || '').slice(0, MAX_URL_VALUE_CHARS);
+  if (!url) return null;
+  const type = value.type === 'element' || value.type === 'link' || value.type === 'download' ? 'element' : 'page';
+  const attribute = type === 'element' ? ((value.attribute === 'href' || value.type === 'link' || value.type === 'download') ? 'href' : 'text') : '';
+  const selector = type === 'element' ? String(value.selector || '').trim() : '';
+  if (type === 'element' && (!selector || selector.length > 4096)) return null;
+  return {
+    id: String(value.id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 6))),
+    name: String(value.name || url).trim().slice(0, 60) || url,
+    url,
+    interval: clampInterval(value.interval, DEFAULT_INTERVAL),
+    type,
+    selector,
+    attribute,
+    targetHref: '',
+    targetText: '',
+    lastValue: limitMonitorValue(value.lastValue || '', attribute),
+    createdAt: value.createdAt || new Date().toISOString(),
+    updatedAt: Number(value.updatedAt) || 0,
+    lastHash: '',
+    lastCheck: '',
+    lastCheckTime: 0,
+    nextCheckTime: 0,
+    baselined: value.baselined !== false
+  };
+}
+
 // ---- 监控存储层（chrome.storage.sync） ----
 async function getMonitors() {
   if (hasChromeStorage) {
     const { monitors = [] } = await chrome.storage.sync.get('monitors');
-    return monitors;
+    return Array.isArray(monitors) ? monitors : [];
   }
   try {
-    return JSON.parse(localStorage.getItem('monitors') || '[]');
+    const parsed = JSON.parse(localStorage.getItem('monitors') || '[]');
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
 }
 
+function storageErrorMessage(err) {
+  const message = String(err && err.message || err || '');
+  if (err && err.code === 'SYNC_QUOTA') return message;
+  if (/quota|max_write|quota_bytes|storage.*full/i.test(message)) {
+    return 'Chrome 同步存储空间不足，请删除旧监控或减少监控内容后重试';
+  }
+  return message || '同步存储失败';
+}
+
 async function saveMonitors(monitors) {
-  if (hasChromeStorage) {
-    await chrome.storage.sync.set({ monitors });
-  } else {
-    localStorage.setItem('monitors', JSON.stringify(monitors));
+  try {
+    if (hasChromeStorage) {
+      await chrome.storage.sync.set({ monitors });
+    } else {
+      localStorage.setItem('monitors', JSON.stringify(monitors));
+    }
+  } catch (err) {
+    const friendly = new Error(storageErrorMessage(err));
+    friendly.code = /quota|max_write|quota_bytes|storage.*full/i.test(String(err && err.message || err)) ? 'SYNC_QUOTA' : 'STORAGE_ERROR';
+    throw friendly;
   }
 }
 
@@ -510,7 +576,7 @@ function collectFormData() {
     type: inputType.value,
     name: inputName.value.trim(),
     url: normalizeUrl(inputUrl.value),
-    interval: Math.max(1, parseInt(inputInterval.value, 10) || DEFAULT_INTERVAL)
+    interval: clampInterval(inputInterval.value, DEFAULT_INTERVAL)
   };
 }
 
@@ -519,74 +585,89 @@ form.addEventListener('submit', async (e) => {
   e.preventDefault();
   hideStatus();
 
-  const data = collectFormData();
-  const monitors = await getMonitors();
+  try {
+    const data = collectFormData();
+    const monitors = await getMonitors();
 
-  if (data.type === 'element' && !pickedElement && editingId === null) {
-    showStatus('请先点击「选择网页元素」在页面上点选目标', true);
-    return;
-  }
-
-  // 编辑模式：直接覆盖旧数据
-  if (editingId !== null) {
-    const idx = monitors.findIndex((m) => m.id === editingId);
-    if (idx === -1) {
-      showStatus('该监控已被删除', true);
-      exitEditMode();
+    if (data.type === 'element' && !pickedElement && editingId === null) {
+      showStatus('请先点击「选择网页元素」在页面上点选目标', true);
       return;
     }
-    const old = monitors[idx];
-    const updated = {
-      ...old,
-      name: data.name,
-      url: data.url,
-      interval: data.interval,
-      type: data.type
-    };
-    if (data.type === 'element') {
-      if (pickedElement) {
-        updated.selector = pickedElement.selector;
-        updated.attribute = getSelectedAttribute();
-        updated.lastValue = attributeValue(pickedElement, updated.attribute);
-      } else {
-        updated.attribute = getSelectedAttribute(); // 保留旧 selector，只改属性也可
-        updated.lastValue = '';
+
+    // 编辑模式：直接覆盖旧数据
+    if (editingId !== null) {
+      const idx = monitors.findIndex((m) => m.id === editingId);
+      if (idx === -1) {
+        showStatus('该监控已被删除', true);
+        exitEditMode();
+        return;
       }
-      updated.lastHash = '';
-    } else {
-      // page 类型：清掉 element 字段；URL 变了重置 hash 基线
-      updated.selector = '';
-      updated.attribute = '';
-      updated.lastValue = '';
-      updated.lastHash = normalizeUrl(old.url) === data.url && old.type === 'page' ? old.lastHash : '';
+      const old = monitors[idx];
+      const updated = {
+        ...old,
+        name: data.name,
+        url: data.url,
+        interval: data.interval,
+        type: data.type
+      };
+      if (data.type === 'element') {
+        if (pickedElement) {
+          updated.selector = pickedElement.selector;
+          updated.attribute = getSelectedAttribute();
+          updated.lastValue = attributeValue(pickedElement, updated.attribute);
+        } else {
+          updated.attribute = getSelectedAttribute(); // 保留旧 selector，只改属性也可
+          updated.lastValue = '';
+        }
+        updated.lastHash = '';
+      } else {
+        // page 类型：清掉 element 字段；URL 变了重置 hash 基线
+        updated.selector = '';
+        updated.attribute = '';
+        updated.lastValue = '';
+        updated.lastHash = normalizeUrl(old.url) === data.url && old.type === 'page' ? old.lastHash : '';
+      }
+      const duplicate = monitors.find((m) => m.id !== editingId && monitorKey(m) === monitorKey(updated));
+      if (duplicate) {
+        showStatus('已存在相同网址、选择器和属性的监控', true);
+        return;
+      }
+      updated.targetHref = '';
+      updated.targetText = '';
+      updated.baselined = false;
+      monitors[idx] = updated;
+      await saveMonitors(monitors);
+      await closePagePicker();
+      dbg('[333 Watcher] Monitor updated:', updated);
+      exitEditMode();
+      await clearPendingPick();
+      showStatus('修改已保存 ✓', false);
+      renderList();
+      return;
     }
-    updated.targetHref = '';
-    updated.targetText = '';
-    updated.baselined = false;
-    monitors[idx] = updated;
-    await saveMonitors(monitors);
-    await closePagePicker();
-    dbg('[333 Watcher] Monitor updated:', updated);
-    exitEditMode();
-    await clearPendingPick();
-    showStatus('修改已保存 ✓', false);
-    renderList();
-    return;
-  }
 
-  // 新增模式：重复检测（同一网址只允许一个监控，避免重复通知）
-  const existing = monitors.find((m) => normalizeUrl(m.url || '') === data.url);
-  if (existing) {
-    showOverwriteConfirm(existing, data);
-    return;
-  }
+    // 新增模式：整页按 URL 去重；元素按 URL + selector + attribute 去重。
+    const candidate = {
+      type: data.type,
+      url: data.url,
+      selector: data.type === 'element' && pickedElement ? pickedElement.selector : '',
+      attribute: data.type === 'element' ? getSelectedAttribute() : ''
+    };
+    const existing = monitors.find((m) => monitorKey(m) === monitorKey(candidate));
+    if (existing) {
+      showOverwriteConfirm(existing, data);
+      return;
+    }
 
-  await addMonitor(data);
+    await addMonitor(data);
+  } catch (err) {
+    showStatus(storageErrorMessage(err), true);
+  }
 });
 
 function attributeValue(pick, attr) {
-  if (attr === 'href') return pick.href || '';
-  return pick.text || '';
+  if (attr === 'href') return limitMonitorValue(pick.href || '', attr);
+  return limitMonitorValue(pick.text || '', attr);
 }
 
 // ---- 新增 ----
@@ -644,50 +725,54 @@ function hideOverwriteConfirm() {
 
 confirmOverwriteBtn.addEventListener('click', async () => {
   if (!pendingOverwrite) return;
-  const { existing, data } = pendingOverwrite;
-  hideOverwriteConfirm();
+  try {
+    const { existing, data } = pendingOverwrite;
+    hideOverwriteConfirm();
 
-  const monitors = await getMonitors();
-  const idx = monitors.findIndex((m) => m.id === existing.id);
-  if (idx !== -1) {
-    const old = monitors[idx];
-    const updated = {
-      ...old,
-      name: data.name,
-      url: data.url,
-      interval: data.interval,
-      type: data.type
-    };
-    if (data.type === 'element' && pickedElement) {
-      updated.selector = pickedElement.selector;
-      updated.attribute = getSelectedAttribute();
-      updated.lastValue = attributeValue(pickedElement, updated.attribute);
-    } else if (data.type === 'page') {
-      updated.selector = '';
-      updated.attribute = '';
-      updated.lastValue = '';
-      updated.lastHash = normalizeUrl(old.url) === data.url ? old.lastHash : '';
+    const monitors = await getMonitors();
+    const idx = monitors.findIndex((m) => m.id === existing.id);
+    if (idx !== -1) {
+      const old = monitors[idx];
+      const updated = {
+        ...old,
+        name: data.name,
+        url: data.url,
+        interval: data.interval,
+        type: data.type
+      };
+      if (data.type === 'element' && pickedElement) {
+        updated.selector = pickedElement.selector;
+        updated.attribute = getSelectedAttribute();
+        updated.lastValue = attributeValue(pickedElement, updated.attribute);
+      } else if (data.type === 'page') {
+        updated.selector = '';
+        updated.attribute = '';
+        updated.lastValue = '';
+        updated.lastHash = normalizeUrl(old.url) === data.url ? old.lastHash : '';
+      }
+      updated.targetHref = '';
+      updated.targetText = '';
+      updated.lastHash = '';
+      updated.baselined = false;
+      monitors[idx] = updated;
+      await saveMonitors(monitors);
+      await closePagePicker();
+      dbg('[333 Watcher] Monitor overwritten:', updated);
     }
-    updated.targetHref = '';
-    updated.targetText = '';
-    updated.lastHash = '';
-    updated.baselined = false;
-    monitors[idx] = updated;
-    await saveMonitors(monitors);
-    await closePagePicker();
-    dbg('[333 Watcher] Monitor overwritten:', updated);
-  }
-  await clearPendingPick();
-  showStatus('已覆盖保存 ✓', false);
-  form.reset();
-  inputType.value = 'page';
-  setSelectedAttribute('text');
-  inputInterval.value = DEFAULT_INTERVAL;
-  syncTypeSections();
-  renderList();
+    await clearPendingPick();
+    showStatus('已覆盖保存 ✓', false);
+    form.reset();
+    inputType.value = 'page';
+    setSelectedAttribute('text');
+    inputInterval.value = DEFAULT_INTERVAL;
+    syncTypeSections();
+    renderList();
 
-  if (hasChromeStorage) {
-    setTimeout(() => window.close(), 400);
+    if (hasChromeStorage) {
+      setTimeout(() => window.close(), 400);
+    }
+  } catch (err) {
+    showStatus(storageErrorMessage(err), true);
   }
 });
 
@@ -927,18 +1012,22 @@ function showCheckFeedback(element, text, isError) {
 
 // ---- 批量更新已有监控的检查间隔 ----
 bulkIntervalBtn.addEventListener('click', async () => {
-  const monitors = await getMonitors();
-  if (!monitors.length) {
-    showStatus('还没有可更新的监控', true);
-    return;
-  }
-  const confirmed = window.confirm('确定把全部 ' + monitors.length + ' 个监控的检查间隔改为 500 分钟吗？');
-  if (!confirmed) return;
+  try {
+    const monitors = await getMonitors();
+    if (!monitors.length) {
+      showStatus('还没有可更新的监控', true);
+      return;
+    }
+    const confirmed = window.confirm('确定把全部 ' + monitors.length + ' 个监控的检查间隔改为 500 分钟吗？');
+    if (!confirmed) return;
 
-  const updated = monitors.map((m) => ({ ...m, interval: DEFAULT_INTERVAL }));
-  await saveMonitors(updated);
-  renderList();
-  showStatus('已将 ' + updated.length + ' 个监控的检查间隔改为 500 分钟 ✓', false);
+    const updated = monitors.map((m) => ({ ...m, interval: DEFAULT_INTERVAL }));
+    await saveMonitors(updated);
+    renderList();
+    showStatus('已将 ' + updated.length + ' 个监控的检查间隔改为 500 分钟 ✓', false);
+  } catch (err) {
+    showStatus(storageErrorMessage(err), true);
+  }
 });
 
 // ---- 测试通知 ----
@@ -966,30 +1055,25 @@ testNotifyBtn.addEventListener('click', async () => {
 });
 
 async function removeMonitor(id) {
-  const monitors = await getMonitors();
-  const target = monitors.find((m) => m.id === id);
-  const url = target ? normalizeUrl(target.url || '') : '';
-  // 同一网址的所有监控一起删除，避免残留监控继续发通知
-  if (url) {
-    const sameUrl = monitors.filter((m) => normalizeUrl(m.url || '') === url);
-    if (sameUrl.length > 1) {
-      const ok = window.confirm('该网址有 ' + sameUrl.length + ' 个监控，将一并删除，是否继续？');
-      if (!ok) return;
+  try {
+    const monitors = await getMonitors();
+    const target = monitors.find((m) => m.id === id);
+    if (!target) return;
+    // 只删除用户点击的这一条；同一网址的其他元素监控应继续运行。
+    const kept = monitors.filter((m) => m.id !== id);
+    await saveMonitors(kept);
+    // 立即清除对应 alarm，防止删除后仍被调度检查
+    if (typeof chrome !== 'undefined' && chrome.alarms) {
+      const removed = monitors.filter((m) => !kept.includes(m));
+      for (const m of removed) {
+        try { await chrome.alarms.clear(ALARM_PREFIX + m.id); } catch {}
+      }
     }
+    if (editingId === id) exitEditMode();
+    renderList();
+  } catch (err) {
+    showStatus(storageErrorMessage(err), true);
   }
-  const kept = url
-    ? monitors.filter((m) => normalizeUrl(m.url || '') !== url)
-    : monitors.filter((m) => m.id !== id);
-  await saveMonitors(kept);
-  // 立即清除对应 alarm，防止删除后仍被调度检查
-  if (typeof chrome !== 'undefined' && chrome.alarms) {
-    const removed = monitors.filter((m) => !kept.includes(m));
-    for (const m of removed) {
-      try { await chrome.alarms.clear(ALARM_PREFIX + m.id); } catch {}
-    }
-  }
-  if (editingId === id) exitEditMode();
-  renderList();
 }
 
 function showStatus(text, isError) {
@@ -1080,17 +1164,19 @@ importConfirmBtn.addEventListener('click', async () => {
     }
     const imported = data.monitors;
     const current = await getMonitors();
-    const map = new Map(current.map((m) => [normalizeUrl(m.url || ''), m]));
+    const map = new Map(current.map((m) => [monitorKey(m), m]));
     let added = 0;
-    for (const m of imported) {
-      const key = normalizeUrl(m.url || '');
-      if (!key) continue;
+    let skipped = 0;
+    for (const raw of imported) {
+      const m = normalizeImportedMonitor(raw);
+      if (!m) { skipped++; continue; }
+      const key = monitorKey(m);
       if (!map.has(key)) added++;
       map.set(key, m);
     }
     await saveMonitors([...map.values()]);
     renderList();
-    showMigrateStatus('导入成功：共 ' + imported.length + ' 条，新增 ' + added + ' 条');
+    showMigrateStatus('导入成功：有效 ' + (imported.length - skipped) + ' 条，新增 ' + added + (skipped ? '，跳过无效 ' + skipped + ' 条' : ''));
   } catch (err) {
     showMigrateStatus('导入失败：' + err.message, true);
   }

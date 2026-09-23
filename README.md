@@ -2,7 +2,7 @@
 
 一个轻量、隐私优先的 Chrome 网页变化监控插件 — 整页 / 指定元素 (`text` / `href`) 定时检查，变化即通知。
 
-> 商店：`gaakbhfclmmeholfdahnpkocdipijndo` · 源码：https://github.com/lijianbin2/333watch · 当前版本 **v0.6.19** (含首次检查基线：新建监控第一次检查只建基线不通知)
+> 商店：`gaakbhfclmmeholfdahnpkocdipijndo` · 源码：https://github.com/lijianbin2/333watch · 当前版本 **v0.6.20** (含网络/存储边界加固、多元素共存与选择器修复)
 
 ## ✨ 功能
 
@@ -19,12 +19,20 @@
 ## 📦 安装
 
 **商店安装（推荐）**
-> v0.6.19 已上传商店，待审核（PENDING_REVIEW 2026-09-19），过审后自动更新
+> v0.6.20 为当前审查优化版本；发布包已生成，提交 Chrome Web Store 审核后即可更新商店版本
 
 **开发者模式**
 1. 打开 `chrome://extensions/` → 开启「开发者模式」
 2. 「加载已解压的扩展程序」→ 选择 `333-watcher` 目录
 3. 固定到工具栏，点击图标打开
+
+## 🏪 Chrome Web Store 说明（v0.6.20）
+
+**建议标题**：333 Watcher — 网页变化监控与通知
+
+**简短说明**：监控网页或指定元素的变化，并在内容更新时发送通知。支持整页、文本和链接监控。
+
+**详细说明**：333 Watcher 是一个隐私优先的 Chrome 网页变化监控插件。它可以定时检查网页内容或指定元素的文本、链接是否发生变化，并通过 Chrome 通知及时提醒。插件支持可视化元素拾取、多个元素共存监控、失效提醒、历史记录和多设备同步。插件不上传监控数据、不包含广告或统计，仅向用户配置的网址发起检查请求。
 
 ## 🚀 快速开始
 
@@ -41,15 +49,17 @@
 
 # 2. 发布（Publisher API v2，旧 v1 已停用）
 $env:ACCESS_TOKEN="ya29...."  # 或 CLIENT_ID/SECRET/REFRESH_TOKEN
-$env:ZIP_PATH="H:/Codex/chrome网页监视插件/333-watcher-0.6.19.zip"  # 脚本默认仍指向上版包，务必覆盖
+$env:ZIP_PATH="H:/Codex/chrome网页监视插件/333-watcher-0.6.20.zip"  # 如使用自定义包路径可通过此变量覆盖
 node "H:/Codex/chrome网页监视插件/publish-cws.mjs"
 # 底层：POST /upload/v2/publishers/00d922f1-2ce1-4252-9b44-a481ffe69180/items/gaakbhfclmmeholfdahnpkocdipijndo:upload
 #       POST /v2/...:publish  |  查询：GET ...:fetchStatus
 ```
 
-打包产物：`H:/Codex/chrome网页监视插件/333-watcher-0.6.19.zip`
+打包产物：`H:/Codex/chrome网页监视插件/333-watcher-0.6.20.zip`
 
 ## 📝 更新日志
+
+- **v0.6.20** `hardening review` — 网络请求增加 20 秒超时与响应体大小限制；整页/元素监控按目标去重，同一页面可共存多个元素；修复 picker/offscreen 的 CSS selector 生成与特殊字符处理；增加 Chrome 同步存储配额友好提示；删除操作改为只删除单条监控；导入数据增加结构清洗与长度限制
 
 - **v0.6.19** `first-check baseline` — 新建/改动监控的第一次成功检查只建立基线、不发变化通知；修复拾取文本 120 字符截断导致的首次必报；旧截断基线自动补全
 - **v0.6.18** `invalid-target notify` — 失效提醒：连续失败 2 次通知失效（error/not-found 通用计数），`已失效` 红徽标 + `检查失败xN`，恢复通知
