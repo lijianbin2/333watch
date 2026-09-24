@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.21 - cross-device notification fix)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.22 - notification event hardening)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -132,6 +132,12 @@ function normalizeImportedMonitor(value) {
     lastCheck: '',
     lastCheckTime: 0,
     nextCheckTime: 0,
+    eventSeq: 0,
+    failCount: 0,
+    lastError: '',
+    invalid: false,
+    invalidReason: '',
+    invalidSince: null,
     baselined: value.baselined !== false
   };
 }
@@ -634,6 +640,11 @@ form.addEventListener('submit', async (e) => {
       }
       updated.targetHref = '';
       updated.targetText = '';
+      updated.failCount = 0;
+      updated.lastError = '';
+      updated.invalid = false;
+      updated.invalidReason = '';
+      updated.invalidSince = null;
       updated.baselined = false;
       monitors[idx] = updated;
       await saveMonitors(monitors);
@@ -689,7 +700,8 @@ async function addMonitor(data) {
     lastHash: '',
     lastCheck: '',
     lastCheckTime: 0,
-    nextCheckTime: 0
+    nextCheckTime: 0,
+    eventSeq: 0
   };
   monitors.push(monitor);
   await saveMonitors(monitors);

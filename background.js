@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.21 - cross-device notification fix)
+ * 333 Watcher - Background Service Worker (v0.6.22 - notification event hardening)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -56,6 +56,12 @@ function clampInterval(value, fallback) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return fallback || DEFAULT_INTERVAL;
   return Math.min(10080, Math.max(1, Math.round(n)));
+}
+
+function nextEventSequence(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return 1;
+  return Math.min(2147483647, Math.floor(n) + 1);
 }
 
 function stripHeavy(html) {
@@ -216,6 +222,12 @@ async function savePickedMonitor(pick, attribute) {
       targetHref: '',
       targetText: '',
       updatedAt: Date.now(),
+      eventSeq: Number(old.eventSeq) || 0,
+      failCount: 0,
+      lastError: '',
+      invalid: false,
+      invalidReason: '',
+      invalidSince: null,
       baselined: false
     };
     await saveMonitors(monitors);
@@ -234,6 +246,12 @@ async function savePickedMonitor(pick, attribute) {
     lastValue: lastValue,
     createdAt: new Date().toISOString(),
     updatedAt: Date.now(),
+    eventSeq: 0,
+    failCount: 0,
+    lastError: '',
+    invalid: false,
+    invalidReason: '',
+    invalidSince: null,
     baselined: false,
     lastHash: '',
     lastCheck: '',
@@ -308,6 +326,12 @@ async function migrateData() {
       lastCheck: m.lastCheck || '',
       lastCheckTime: m.lastCheckTime || 0,
       nextCheckTime: m.nextCheckTime || 0,
+      eventSeq: Math.max(0, Number(m.eventSeq) || 0),
+      failCount: Math.max(0, Number(m.failCount) || 0),
+      lastError: String(m.lastError || ''),
+      invalid: m.invalid === true,
+      invalidReason: String(m.invalidReason || ''),
+      invalidSince: m.invalidSince || null,
       baselined: m.baselined !== false
     };
   });
@@ -422,7 +446,7 @@ async function checkPage(monitor, html) {
   const oldHash = monitor.lastHash || null;
   const changed = oldHash !== null && newHash !== oldHash;
   dbg('[333 Watcher] [page] oldHash:', oldHash, 'newHash:', newHash, 'changed:', changed);
-  return { changed, update: { lastHash: newHash } };
+  return { changed, prevValue: oldHash, update: { lastHash: newHash } };
 }
 
 // ---------------- 检测：json (微信开发者工具 config.json 专用) ----------------
@@ -599,7 +623,20 @@ async function checkMonitor(monitor) {
       if (idx === -1) return 'error';
       const nowTs = Date.now();
       const firstBaseline = monitor.baselined === false;
-      list[idx] = { ...list[idx], lastValue: cur, lastCheck: checkedAt, lastCheckTime: nowTs, nextCheckTime: nowTs + Math.max(1, Number(list[idx].interval) || 1) * 60000, lastError: '', failCount: 0, invalid: false, invalidReason: '', invalidSince: null, baselined: true };
+      list[idx] = {
+        ...list[idx],
+        lastValue: cur,
+        eventSeq: changed ? nextEventSequence(list[idx].eventSeq) : (Number(list[idx].eventSeq) || 0),
+        lastCheck: checkedAt,
+        lastCheckTime: nowTs,
+        nextCheckTime: nowTs + Math.max(1, Number(list[idx].interval) || 1) * 60000,
+        lastError: '',
+        failCount: 0,
+        invalid: false,
+        invalidReason: '',
+        invalidSince: null,
+        baselined: true
+      };
       await saveMonitors(list);
       if (firstBaseline) {
         dbg('[333 Watcher] first check baselined, notification suppressed:', monitor.id);
@@ -708,9 +745,11 @@ async function checkMonitor(monitor) {
   const nowTs = Date.now();
   const wasInvalid = !!monitors[idx].invalid;
   const firstBaseline = monitors[idx].baselined === false;
+  const eventSeq = outcome.changed ? nextEventSequence(monitors[idx].eventSeq) : (Number(monitors[idx].eventSeq) || 0);
   monitors[idx] = {
     ...monitors[idx],
     ...outcome.update,
+    eventSeq,
     lastCheck: checkedAt,
     lastCheckTime: nowTs,
     nextCheckTime: nowTs + Math.max(1, Number(monitors[idx].interval) || DEFAULT_INTERVAL) * 60000,
@@ -785,6 +824,7 @@ function buildNotificationEvent(monitor, kind, message, details) {
     String(values.oldValue == null ? '' : values.oldValue),
     String(values.newValue == null ? '' : values.newValue),
     String(values.reason == null ? '' : values.reason),
+    String(values.sequence == null ? '' : values.sequence),
     String(message || '')
   ].join('\u001f');
   return {
@@ -828,7 +868,8 @@ async function notifyChange(monitor, change) {
 
   const event = buildNotificationEvent(monitor, 'change', message, {
     oldValue: change && change.oldValue,
-    newValue: change && change.newValue
+    newValue: change && change.newValue,
+    sequence: monitor.eventSeq
   });
   if (await hasReadEvent(event)) {
     dbg('[333 Watcher] notification skipped: synced history already read:', event.eventKey);
@@ -1006,7 +1047,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         lastHash: '',
         lastCheck: '',
         lastCheckTime: 0,
-        nextCheckTime: 0
+        nextCheckTime: 0,
+        eventSeq: 0
       };
       monitors.push(monitor);
       await saveMonitors(monitors);
@@ -1106,7 +1148,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-dbg('[333 Watcher] Background service worker loaded (v0.6.21)');
+dbg('[333 Watcher] Background service worker loaded (v0.6.22)');
 
 
 

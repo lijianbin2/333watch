@@ -1,5 +1,5 @@
  /**
- * 333 Watcher - Offscreen Document (v0.6.21)
+ * 333 Watcher - Offscreen Document (v0.6.22)
  *
  * Service Worker 无 DOM，这里负责：
  * DOMParser 解析页面 HTML + querySelector 定位元素，返回属性值。
