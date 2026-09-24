@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.20 - hardening review)
+ * 333 Watcher - Background Service Worker (v0.6.21 - cross-device notification fix)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -777,6 +777,33 @@ function sendNotification(notifId, title, message) {
   });
 }
 
+function buildNotificationEvent(monitor, kind, message, details) {
+  const values = details || {};
+  const stableValue = [
+    kind,
+    monitorKey(monitor),
+    String(values.oldValue == null ? '' : values.oldValue),
+    String(values.newValue == null ? '' : values.newValue),
+    String(values.reason == null ? '' : values.reason),
+    String(message || '')
+  ].join('\u001f');
+  return {
+    eventKey: 'v1-' + simpleHash(stableValue),
+    url: monitor.url,
+    message: message
+  };
+}
+
+async function hasReadEvent(event) {
+  const history = await getHistory();
+  return history.some(h => {
+    if (!h || h.read !== true) return false;
+    if (event.eventKey && h.eventKey) return h.eventKey === event.eventKey;
+    // v0.6.20 及更早版本没有 eventKey，使用同步历史中的消息进行兼容匹配。
+    return h.url === event.url && h.message === event.message;
+  });
+}
+
 async function notifyChange(monitor, change) {
   const notifId = 'notif-' + monitor.id;
   const title = '333 Watcher';
@@ -799,6 +826,15 @@ async function notifyChange(monitor, change) {
     message += '\n旧: ' + fmt(change.oldValue) + '\n新: ' + fmt(change.newValue);
   }
 
+  const event = buildNotificationEvent(monitor, 'change', message, {
+    oldValue: change && change.oldValue,
+    newValue: change && change.newValue
+  });
+  if (await hasReadEvent(event)) {
+    dbg('[333 Watcher] notification skipped: synced history already read:', event.eventKey);
+    return { ok: true, skipped: true, error: null };
+  }
+
   const result = await sendNotification(notifId, title, message);
   if (!result.ok) {
     console.error('[333 Watcher] 通知发送失败，error =', result.error);
@@ -807,7 +843,9 @@ async function notifyChange(monitor, change) {
     await addHistory({
       name: monitor.name || monitor.url,
       url: monitor.url,
-      message: message
+      message: message,
+      eventKey: event.eventKey,
+      kind: 'change'
     });
   }
   return result;
@@ -816,18 +854,28 @@ async function notifyChange(monitor, change) {
 async function notifyInvalid(monitor, reason) {
   const name = monitor.name || monitor.url;
   const message = '"' + name + '" 监控失效：' + reason + '\n请检查网址是否有效，或重新拾取元素';
+  const event = buildNotificationEvent(monitor, 'invalid', message, { reason: reason });
+  if (await hasReadEvent(event)) {
+    dbg('[333 Watcher] notification skipped: synced history already read:', event.eventKey);
+    return { ok: true, skipped: true, error: null };
+  }
   const result = await sendNotification('notif-invalid-' + monitor.id, '333 Watcher · 监控失效', message);
   if (result.ok) {
-    await addHistory({ name: name, url: monitor.url, message: message, kind: 'invalid' });
+    await addHistory({ name: name, url: monitor.url, message: message, eventKey: event.eventKey, kind: 'invalid' });
   }
   return result;
 }
 async function notifyRecovered(monitor) {
   const name = monitor.name || monitor.url;
   const message = '"' + name + '" 已恢复正常 ✓';
+  const event = buildNotificationEvent(monitor, 'recovered', message);
+  if (await hasReadEvent(event)) {
+    dbg('[333 Watcher] notification skipped: synced history already read:', event.eventKey);
+    return { ok: true, skipped: true, error: null };
+  }
   const result = await sendNotification('notif-recovered-' + monitor.id, '333 Watcher · 监控恢复', message);
   if (result.ok) {
-    await addHistory({ name: name, url: monitor.url, message: message, kind: 'recovered' });
+    await addHistory({ name: name, url: monitor.url, message: message, eventKey: event.eventKey, kind: 'recovered' });
   }
   return result;
 }
@@ -1058,7 +1106,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-dbg('[333 Watcher] Background service worker loaded (v0.6.20)');
+dbg('[333 Watcher] Background service worker loaded (v0.6.21)');
 
 
 
@@ -1092,7 +1140,10 @@ async function addHistory(record) {
     const history = await getHistory();
     const now = Date.now();
     const dedupWindow = 5 * 60 * 1000;
-    const isDup = history.some(h => h.message === record.message && h.url === record.url && Math.abs(now - new Date(h.time).getTime()) < dedupWindow);
+    const isDup = history.some(h => {
+      if (record.eventKey && h.eventKey) return h.eventKey === record.eventKey;
+      return h.message === record.message && h.url === record.url && Math.abs(now - new Date(h.time).getTime()) < dedupWindow;
+    });
     if (isDup) { dbg('[333 Watcher] history dedup skipped:', record.message); return; }
     history.unshift({
       id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
@@ -1100,6 +1151,8 @@ async function addHistory(record) {
       url: record.url,
       time: new Date().toISOString(),
       message: record.message,
+      eventKey: record.eventKey || null,
+      kind: record.kind || 'change',
       read: false
     });
     await saveHistory(history);

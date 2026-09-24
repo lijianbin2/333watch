@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - 元素选择器 Content Script v0.6.20
+ * 333 Watcher - 元素选择器 Content Script v0.6.21
  * 修复：微信文档等 Vue 页面选不到的问题
  */
 (function () {
@@ -32,7 +32,7 @@
   appendSafe(overlay);
   appendSafe(tip);
   appendSafe(badge);
-  console.log('[333 Watcher] picker overlay injected v0.6.20', overlay, tip, badge, location.href);
+  console.log('[333 Watcher] picker overlay injected v0.6.21', overlay, tip, badge, location.href);
 
   function getSelector(el) {
     if (!el || !el.tagName) return 'body';
