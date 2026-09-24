@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "333 Watcher",
   "version": "0.6.21",
-  "description": "Monitor website changes and notify updates — v0.6.21",
+  "description": "Monitor website changes, sync read notifications, and avoid cross-device repeats — v0.6.21",
   "action": {
     "default_popup": "add-monitor.html",
     "default_title": "333 Watcher"
