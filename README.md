@@ -4,7 +4,7 @@
 
 当前版本：**v0.6.21**
 
-商店状态：v0.6.21 待提交 Chrome Web Store 审核
+商店状态：v0.6.21 已提交 Chrome Web Store 审核，状态为 `PENDING_REVIEW`（2026-09-24）
 
 商店扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
