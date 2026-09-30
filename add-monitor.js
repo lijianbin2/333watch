@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.30 - 导入不再丢弃旧版链接监控)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.31 - 跨设备重复通知修复)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）

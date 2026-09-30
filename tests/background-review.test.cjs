@@ -408,6 +408,51 @@ async function test() {
     'the losing claim must be released so the winner on the other device is not blocked'
   );
 
+  // 回归：对手已经"发完"（pending:false, delivered:true）时，本机必须撤回。
+  //
+  // 真实时序：storage.sync 传播要几百毫秒，而对手赢下仲裁后立刻调用
+  // completeNotificationClaim 把自己的认领置为 pending:false。等本机在窗口内
+  // 读到这条记录时，对手早已投递完毕 —— 旧实现只把"仍 pending"的认领当成
+  // 竞争者（isActiveClaim），已投递的记录被过滤掉，于是本机认为无人竞争，
+  // 等满窗口后又发一条一模一样的提醒（用户表现为同一条提醒收到两遍）。
+  //
+  // 注意：认领成功与否只在 claimNotificationEvent 里查过一次 hasSeenEvent，
+  // 仲裁阶段不再复查，所以"已投递"必须在这里单独判定。
+  syncStore.clear();
+  syncStore.set('devices', { [localDeviceId]: vNow, 'd-foreign': vNow });
+  const settledRival = {
+    id: 'settled-rival',
+    eventKey: multiEvent.eventKey,
+    claimAt: vNow - 1000,
+    pending: false,
+    delivered: true
+  };
+  syncStore.set('history', [
+    { id: 'mine-settled-race', eventKey: multiEvent.eventKey, claimAt: vNow, pending: true },
+    settledRival
+  ]);
+  assert.equal(
+    await context.arbitrateClaim(multiEvent, 'mine-settled-race'),
+    'skip',
+    'an already-delivered rival must suppress the duplicate notification'
+  );
+  // 对手已投递（pending:false）不是"活跃竞争者"，不应参与赢家排序。
+  assert.equal(
+    context.rivalClaimsOf({ eventKey: multiEvent.eventKey }, syncStore.get('history'), 'mine-settled-race').length,
+    0,
+    'a settled record must not count as an active rival claim'
+  );
+  // 仍未投递的过期认领不能当成"已投递"，否则崩溃遗留的记录会永久吞掉提醒。
+  syncStore.set('history', [
+    { id: 'mine-expired-race', eventKey: multiEvent.eventKey, claimAt: vNow, pending: true },
+    { id: 'expired-rival', eventKey: multiEvent.eventKey, claimAt: vNow - 10 * 60 * 1000, pending: true }
+  ]);
+  assert.equal(
+    await context.arbitrateClaim(multiEvent, 'mine-expired-race'),
+    'send',
+    'an expired undelivered rival must not block the notification'
+  );
+
   // 单设备快速路径：没有其它设备时窗口必须保持 600ms，不能被无条件拉长。
   syncStore.clear();
   syncStore.set('devices', { [localDeviceId]: vNow });

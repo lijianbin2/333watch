@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.30**
+当前版本：**v0.6.31**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -246,7 +246,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.30"
+$version = "0.6.31"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -267,6 +267,12 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.31
+
+- 修复跨设备重复提醒的最后一个漏洞：仲裁阶段只把"仍处于认领中"（`pending:true`）的记录当作竞争对手，但对手赢下仲裁后会立刻调用 `completeNotificationClaim` 把自己的认领置为 `pending:false`。而 `storage.sync` 的传播要几百毫秒，本机在轮询窗口里读到的往往是**已经投递完成**的形态——这条记录被 `rivalClaimsOf` 过滤掉，于是本机得出"无人竞争"的错误结论，等满窗口后又发出一条一模一样的提醒（用户表现为同一条提醒收到两遍）。现在额外用 `deliveredRivalClaimsOf` 判定"同一事件已由其他设备投递"，直接撤回本机认领；
+- 该判定只认 `delivered:true`：发送失败时认领会被删除，留存在 `history` 里的非 pending 记录一定投递成功过；而 `pending` 但已过期的认领（崩溃遗留）不算"已投递"，否则会永久吞掉这条提醒；
+- 补充回归测试覆盖两侧：已投递的对手必须让本机撤回，过期未投递的对手不得阻塞提醒。已验证该断言在修复前失败（`arbitrateClaim` 返回 `send`）。
 
 ### v0.6.30
 

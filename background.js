@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.30 - per-monitor error isolation on catch-up)
+ * 333 Watcher - Background Service Worker (v0.6.31 - 跨设备重复通知修复)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -1080,6 +1080,17 @@ async function arbitrateClaim(event, claimId) {
       // 赢家无需等满窗口：对手会看到同样的全序结果并撤回自己的认领。
       return 'send';
     }
+    // 对手已经赢下仲裁并投递完毕（pending:false, delivered:true）时，
+    // 这条记录不能再算"活跃竞争者"，但它恰恰证明同一事件已经提醒过了。
+    // storage.sync 传播要几百毫秒，而对手发完就立刻把 pending 置为 false，
+    // 本机在窗口内读到的往往是"已投递"形态而非"认领中"形态。只看活跃认领
+    // 会得出"无人竞争"的错误结论，等满窗口后再发一条一模一样的通知。
+    // 认领成功与否只在 claimNotificationEvent 里查过一次 hasSeenEvent，
+    // 仲裁阶段不复查，因此这里必须单独判定已投递。
+    if (deliveredRivalClaimsOf(event, latest, claimId).length) {
+      dbg('[333 Watcher] notification already delivered on another device:', event.eventKey);
+      return 'skip';
+    }
     const remaining = deadline - Date.now();
     if (remaining <= 0) return 'send';
     await waitMs(Math.min(CLAIM_POLL_MS, remaining));
@@ -1141,6 +1152,19 @@ function pickClaimWinner(claims) {
 function rivalClaimsOf(event, history, claimId) {
   return (Array.isArray(history) ? history : []).filter(h => (
     h && h.eventKey === event.eventKey && h.id !== claimId && isActiveClaim(h)
+  ));
+}
+
+/**
+ * 同一 eventKey 下、别的设备已经投递完成的历史记录。
+ *
+ * 只认 delivered:true：completeNotificationClaim 在发送失败时会直接删除认领，
+ * 所以留存在 history 里的非 pending 记录一定投递成功过。
+ * pending 但已过期（崩溃遗留）的认领不算数，否则会永久吞掉这条提醒。
+ */
+function deliveredRivalClaimsOf(event, history, claimId) {
+  return (Array.isArray(history) ? history : []).filter(h => (
+    h && h.eventKey === event.eventKey && h.id !== claimId && !h.pending && h.delivered === true
   ));
 }
 
@@ -1620,7 +1644,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.30)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.31)');
 
 
 
