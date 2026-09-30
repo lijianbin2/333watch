@@ -223,7 +223,14 @@
     backdrop.appendChild(card); shadow.appendChild(style); shadow.appendChild(backdrop);
     appendSafe(dialogHost);
     saveBtn.addEventListener('click', function(){ savePicked(saveBtn, msg); });
-    reselectBtn.addEventListener('click', function(){ if(dialogHost) dialogHost.remove(); dialogHost=null; startPickMode(); if(badge) badge.style.display='block'; });
+    reselectBtn.addEventListener('click', function(){
+      if(dialogHost) dialogHost.remove(); dialogHost=null;
+      // 重新选择意味着放弃这次结果：清掉 pendingPick，否则下次打开 popup 会自动
+      // 回填一个用户已经放弃的陈旧选择。
+      try{ chrome.storage.sync.remove('pendingPick'); }catch(e){}
+      pickResult=null;
+      startPickMode(); if(badge) badge.style.display='block';
+    });
     if(badge) badge.style.display='none';
   }
 
@@ -248,14 +255,18 @@
 
   window.__w333PickerCleanup = cleanup;
   window.__w333PickerDebug = { overlay: overlay, tip: tip, badge: badge, highlight: highlight };
+  function onRuntimeMessage(msg){ if(msg && msg.type==='w333-close-dialog') cleanup(); }
   function cleanup(){
     stopPickMode();
     try{ overlay.remove(); }catch(e){} try{ tip.remove(); }catch(e){} try{ badge && badge.remove(); }catch(e){}
     if(dialogHost) try{ dialogHost.remove(); }catch(e){}
     dialogHost=null; pickResult=null; window.__w333PickerActive=false;
     document.removeEventListener('keydown', onKey, true); window.removeEventListener('keydown', onKey, true);
+    // 同一页面反复注入选择器时，content script 上下文是复用的：
+    // 不摘掉监听器会每次注入都多留一个，指向已被清理的旧闭包。
+    try{ chrome.runtime.onMessage.removeListener(onRuntimeMessage); }catch(e){}
   }
-  chrome.runtime.onMessage.addListener(function(msg){ if(msg && msg.type==='w333-close-dialog') cleanup(); });
+  chrome.runtime.onMessage.addListener(onRuntimeMessage);
 
   startPickMode();
   showToast('已进入选择模式：鼠标移动高亮，点击选中，Esc 退出');

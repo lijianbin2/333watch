@@ -476,6 +476,98 @@ async function test() {
   );
   assert.equal(notificationCount, 1, 'the retried round notifies exactly once after storage recovers');
 
+  // ---- monitors 整键读-改-写必须串行化，否则并发写入互相覆盖 ----
+  syncStore.clear();
+  // 给 storage 读加延迟：没有互斥锁时两个读会交错，导致后写者覆盖先写者。
+  const realSyncGet = chrome.storage.sync.get;
+  chrome.storage.sync.get = async (key) => {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return realSyncGet(key);
+  };
+  try {
+    await Promise.all([
+      context.mutateMonitors((list) => { list.push({ id: 'p1', url: 'https://example.test/1', type: 'page' }); return true; }),
+      context.mutateMonitors((list) => { list.push({ id: 'p2', url: 'https://example.test/2', type: 'page' }); return true; }),
+      context.mutateMonitors((list) => { list.push({ id: 'p3', url: 'https://example.test/3', type: 'page' }); return true; }),
+    ]);
+  } finally {
+    chrome.storage.sync.get = realSyncGet;
+  }
+  assert.deepEqual(
+    syncStore.get('monitors').map((m) => m.id),
+    ['p1', 'p2', 'p3'],
+    'concurrent monitor writes must not lose records'
+  );
+
+  // 弃写：mutator 返回 false 时不得落盘。
+  await context.mutateMonitors(() => false);
+  assert.equal(syncStore.get('monitors').length, 3, 'an aborted mutation must not be written');
+
+  // ---- popup 的 mutate-monitors 通道：必须基于存储里的最新列表，而不是页面旧快照 ----
+  const ids = () => syncStore.get('monitors').map((m) => m.id);
+  assert.deepEqual(plain(await sendMessage({
+    type: 'mutate-monitors',
+    op: 'upsert',
+    monitor: { id: 'p1', url: 'https://example.test/1', type: 'page', name: 'renamed' },
+  })), {
+    ok: true, id: 'p1', mode: 'updated',
+  });
+  assert.equal(syncStore.get('monitors')[0].name, 'renamed', 'upsert must replace the existing monitor');
+  assert.deepEqual(ids(), ['p1', 'p2', 'p3'], 'upsert must not disturb other monitors');
+
+  assert.deepEqual(plain(await sendMessage({
+    type: 'mutate-monitors',
+    op: 'upsert',
+    monitor: { id: 'p4', url: 'https://example.test/4', type: 'page' },
+  })), {
+    ok: true, id: 'p4', mode: 'added',
+  });
+  assert.deepEqual(ids(), ['p1', 'p2', 'p3', 'p4'], 'a new monitor id must be appended');
+
+  assert.deepEqual(plain(await sendMessage({ type: 'mutate-monitors', op: 'remove', id: 'p2' })), { ok: true, removed: 1 });
+  assert.deepEqual(ids(), ['p1', 'p3', 'p4'], 'remove must delete only the requested monitor');
+  assert.deepEqual(plain(await sendMessage({ type: 'mutate-monitors', op: 'remove', id: 'nope' })), { ok: true, removed: 0 });
+  assert.deepEqual(ids(), ['p1', 'p3', 'p4'], 'removing an unknown id must be a no-op');
+
+  await sendMessage({ type: 'mutate-monitors', op: 'set-interval', interval: 500 });
+  assert.deepEqual(
+    syncStore.get('monitors').map((m) => m.interval),
+    [500, 500, 500],
+    'set-interval must update every monitor'
+  );
+
+  const imported = await sendMessage({
+    type: 'mutate-monitors',
+    op: 'import-by-key',
+    monitors: [
+      { id: 'imp-1', url: 'https://example.test/imported', type: 'page' },
+      { id: 'imp-2', url: 'https://example.test/p1-url', type: 'page' },
+    ],
+  });
+  assert.equal(imported.added, 2, 'import must count newly added monitors');
+  assert.equal(imported.total, 5, 'import must merge into the existing list');
+  assert.equal(ids().includes('imp-1'), true, 'import must keep the imported monitor');
+  assert.equal(ids().includes('p1'), true, 'import must not drop existing monitors');
+
+  // 页面侧新增去重读的是旧快照：并发下可能撞上同 key，background 必须兜底不建重复项。
+  const dupeBackstop = plain(await sendMessage({
+    type: 'mutate-monitors',
+    op: 'upsert',
+    monitor: { id: 'p9-fresh-id', url: 'https://example.test/1', type: 'page', name: 'raced' },
+  }));
+  assert.equal(dupeBackstop.mode, 'updated', 'an upsert colliding on monitorKey must update, not duplicate');
+  assert.equal(dupeBackstop.id, 'p1', 'the colliding upsert must keep the existing monitor id');
+  assert.equal(syncStore.get('monitors').length, 5, 'a colliding upsert must not add a row');
+  assert.equal(
+    syncStore.get('monitors').find((m) => m.id === 'p1').name,
+    'raced',
+    'a colliding upsert must apply the new definition'
+  );
+
+  const bad = await sendMessage({ type: 'mutate-monitors', op: 'nope' });
+  assert.equal(bad.ok, false, 'an unknown op must be rejected');
+  assert.equal(syncStore.get('monitors').length, 5, 'an unknown op must not write');
+
   syncStore.clear();
   syncStore.set('monitors', [{
     id: 'old-1',
@@ -506,3 +598,5 @@ test().catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });
+// 跨 realm：vm 内创建的对象原型与本 realm 不同，strict deepEqual 会拒，先归一化。
+const plain = (value) => JSON.parse(JSON.stringify(value));

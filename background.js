@@ -236,6 +236,28 @@ async function saveMonitors(monitors) {
   }
 }
 
+// monitors 也是整键读-改-写：后台定时检查、popup 增删改、导入、迁移都可能同时动它，
+// 后写者会整键覆盖先写者（丢监控，或把刚写入的检查基线回滚）。所有写入统一走这把
+// 进程内互斥锁 + mutateMonitors()，保证“读-改-写”在同一临界区内完成。
+let _monitorsLock = Promise.resolve();
+function withMonitorsLock(fn) {
+  const run = _monitorsLock.then(() => fn(), () => fn());
+  _monitorsLock = run.then(() => {}, () => {});
+  return run;
+}
+
+// mutator 直接修改传入的数组；返回 false 表示放弃本次写入（例如目标监控已被删除），
+// 其余返回值原样透传给调用方。
+async function mutateMonitors(mutator) {
+  return withMonitorsLock(async () => {
+    const list = await getMonitors();
+    const result = await mutator(list);
+    if (result === false) return { saved: false, result: undefined };
+    await saveMonitors(list);
+    return { saved: true, result };
+  });
+}
+
 async function savePickedMonitor(pick, attribute) {
   if (!pick || !pick.selector) {
     return { ok: false, error: '未获取到元素信息，请重新选择' };
@@ -246,68 +268,68 @@ async function savePickedMonitor(pick, attribute) {
   }
   const attr = ['text', 'href', 'src'].includes(attribute) ? attribute : 'text';
   const name = (String(pick.text || pick.pageTitle || '指定内容').trim().slice(0, 60)) || '指定内容';
-  const monitors = await getMonitors();
-  // 同一页面可以监控多个不同元素；仅完全相同的目标才更新。
-  const candidate = { type: 'element', url, selector: pick.selector, attribute: attr };
-  const key = monitorKey(candidate);
-  const idx = monitors.findIndex((m) => monitorKey(m) === key);
-
   const lastValue = attributeValueOfPick(pick, attr);
+  // 读-改-写放进互斥区，避免与后台检查/popup 操作互相覆盖。
+  const outcome = await mutateMonitors((monitors) => {
+    // 同一页面可以监控多个不同元素；仅完全相同的目标才更新。
+    const candidate = { type: 'element', url, selector: pick.selector, attribute: attr };
+    const key = monitorKey(candidate);
+    const idx = monitors.findIndex((m) => monitorKey(m) === key);
 
-  if (idx !== -1) {
-    const old = monitors[idx];
-    monitors[idx] = {
-      ...old,
+    if (idx !== -1) {
+      const old = monitors[idx];
+      monitors[idx] = {
+        ...old,
+        name: name,
+        url: url,
+        type: 'element',
+        selector: pick.selector,
+        attribute: attr,
+        lastValue: lastValue,
+        lastHash: '',
+        targetHref: '',
+        targetText: '',
+        updatedAt: Date.now(),
+        eventSeq: Number(old.eventSeq) || 0,
+        failCount: 0,
+        lastError: '',
+        invalid: false,
+        invalidReason: '',
+        invalidSince: null,
+        baselined: false
+      };
+      return { mode: 'updated', id: old.id };
+    }
+
+    const monitor = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
       name: name,
       url: url,
+      interval: DEFAULT_INTERVAL,
       type: 'element',
       selector: pick.selector,
       attribute: attr,
       lastValue: lastValue,
-      lastHash: '',
-      targetHref: '',
-      targetText: '',
+      createdAt: new Date().toISOString(),
       updatedAt: Date.now(),
-      eventSeq: Number(old.eventSeq) || 0,
+      eventSeq: 0,
       failCount: 0,
       lastError: '',
       invalid: false,
       invalidReason: '',
       invalidSince: null,
-      baselined: false
+      baselined: false,
+      lastHash: '',
+      lastCheck: '',
+      lastCheckTime: 0,
+      nextCheckTime: 0
     };
-    await saveMonitors(monitors);
-    dbg('[333 Watcher] picked monitor updated:', monitors[idx].id);
-    return { ok: true, mode: 'updated', id: old.id };
-  }
-
-  const monitor = {
-    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-    name: name,
-    url: url,
-      interval: DEFAULT_INTERVAL,
-    type: 'element',
-    selector: pick.selector,
-    attribute: attr,
-    lastValue: lastValue,
-    createdAt: new Date().toISOString(),
-    updatedAt: Date.now(),
-    eventSeq: 0,
-    failCount: 0,
-    lastError: '',
-    invalid: false,
-    invalidReason: '',
-    invalidSince: null,
-    baselined: false,
-    lastHash: '',
-    lastCheck: '',
-    lastCheckTime: 0,
-    nextCheckTime: 0
-  };
-  monitors.push(monitor);
-  await saveMonitors(monitors);
-  dbg('[333 Watcher] picked monitor added:', monitor.id);
-  return { ok: true, mode: 'added', id: monitor.id };
+    monitors.push(monitor);
+    return { mode: 'added', id: monitor.id };
+  });
+  if (!outcome.saved) return { ok: false, error: '保存监控失败' };
+  dbg('[333 Watcher] picked monitor ' + outcome.result.mode + ':', outcome.result.id);
+  return { ok: true, mode: outcome.result.mode, id: outcome.result.id };
 }
 
 function attributeValueOfPick(pick, attr) {
@@ -317,7 +339,13 @@ function attributeValueOfPick(pick, attr) {
 }
 
 // ---------------- 数据迁移 ----------------
+// 迁移会整键重写 monitors，与后台检查/popup 写入并发时会把它们的改动整键覆盖掉，
+// 因此整段放进 monitors 互斥区（内部直接用 saveMonitors，锁不可重入）。
 async function migrateData() {
+  return withMonitorsLock(migrateDataUnlocked);
+}
+
+async function migrateDataUnlocked() {
   const data = await chrome.storage.sync.get(null);
   let monitors = Array.isArray(data.monitors) ? data.monitors : [];
   let migrated = false;
@@ -664,37 +692,42 @@ async function checkMonitor(monitor) {
       const cur = await getTestValue(attr);
       const last = (monitor.lastValue == null ? null : String(monitor.lastValue));
       const changed = last !== null && cur !== last;
-      const list = await getMonitors();
-      const idx = list.findIndex((m) => m.id === monitor.id);
-      if (idx === -1) return 'error';
-      const nowTs = Date.now();
       const firstBaseline = monitor.baselined === false;
-      const superseded = baselineSuperseded(
-        { changed: changed, baseValue: last, baseField: 'lastValue' },
-        list[idx]
-      );
-      if (superseded) {
-        dbg('[333 Watcher] test change already applied elsewhere, notification suppressed:', monitor.id);
-      }
-      const update = superseded
-        ? updateWithoutSupersededBaseline({ baseField: 'lastValue', update: { lastValue: cur } }, list[idx])
-        : { lastValue: cur };
-      list[idx] = {
-        ...list[idx],
-        ...update,
-        eventSeq: changed && !superseded ? nextEventSequence(list[idx].eventSeq) : (Number(list[idx].eventSeq) || 0),
-        lastCheck: checkedAt,
-        lastCheckTime: nowTs,
-        nextCheckTime: nowTs + Math.max(1, Number(list[idx].interval) || 1) * 60000,
-        lastError: '',
-        failCount: 0,
-        invalid: false,
-        invalidReason: '',
-        invalidSince: null,
-        baselined: true
-      };
+      let saved = null;
+      let superseded = false;
       try {
-        await saveMonitors(list);
+        const outcome = await mutateMonitors((list) => {
+          const idx = list.findIndex((m) => m.id === monitor.id);
+          if (idx === -1) return false;
+          const nowTs = Date.now();
+          superseded = baselineSuperseded(
+            { changed: changed, baseValue: last, baseField: 'lastValue' },
+            list[idx]
+          );
+          if (superseded) {
+            dbg('[333 Watcher] test change already applied elsewhere, notification suppressed:', monitor.id);
+          }
+          const update = superseded
+            ? updateWithoutSupersededBaseline({ baseField: 'lastValue', update: { lastValue: cur } }, list[idx])
+            : { lastValue: cur };
+          list[idx] = {
+            ...list[idx],
+            ...update,
+            eventSeq: changed && !superseded ? nextEventSequence(list[idx].eventSeq) : (Number(list[idx].eventSeq) || 0),
+            lastCheck: checkedAt,
+            lastCheckTime: nowTs,
+            nextCheckTime: nowTs + Math.max(1, Number(list[idx].interval) || 1) * 60000,
+            lastError: '',
+            failCount: 0,
+            invalid: false,
+            invalidReason: '',
+            invalidSince: null,
+            baselined: true
+          };
+          saved = { monitor: list[idx], superseded: superseded };
+          return true;
+        });
+        if (!outcome.saved) return 'deleted';
       } catch (err) {
         // 基线没写进同步存储时绝不能发通知：下一轮会再次判定为变化并重试，
         // 现在通知只会造成一次无法追溯的误报。
@@ -706,7 +739,7 @@ async function checkMonitor(monitor) {
         return 'baselined';
       }
       if (changed && !superseded) {
-        await notifyChange(list[idx], { oldValue: last, newValue: cur });
+        await notifyChange(saved.monitor, { oldValue: last, newValue: cur });
         return 'changed';
       }
       if (changed) return 'changed-elsewhere';
@@ -803,45 +836,54 @@ async function checkMonitor(monitor) {
   }
 
   const monitors = await getMonitors();
-  const idx = monitors.findIndex((m) => m.id === monitor.id);
-  if (idx === -1) return 'error';
+  if (!monitors.some((m) => m.id === monitor.id)) return 'error';
 
-  const nowTs = Date.now();
-  const wasInvalid = !!monitors[idx].invalid;
-  const firstBaseline = monitors[idx].baselined === false;
-  const superseded = baselineSuperseded(outcome, monitors[idx]);
-  if (superseded) {
-    dbg('[333 Watcher] change already recorded by another device, notification suppressed:', monitor.url);
-  }
-  const changeEventSeq = (outcome.changed && !superseded) ? nextEventSequence(monitors[idx].eventSeq) : (Number(monitors[idx].eventSeq) || 0);
-  // 恢复事件也消耗一个序号，避免同一监控多次“失效 -> 恢复”被合并。
-  const eventSeq = wasInvalid ? nextEventSequence(changeEventSeq) : changeEventSeq;
-  const update = superseded
-    ? updateWithoutSupersededBaseline(outcome, monitors[idx])
-    : outcome.update;
-  monitors[idx] = {
-    ...monitors[idx],
-    ...update,
-    eventSeq,
-    lastCheck: checkedAt,
-    lastCheckTime: nowTs,
-    nextCheckTime: nowTs + Math.max(1, Number(monitors[idx].interval) || DEFAULT_INTERVAL) * 60000,
-    lastError: '',
-    failCount: 0,
-    invalid: false,
-    invalidReason: '',
-    invalidSince: null,
-    baselined: true
-  };
+  let saved = null;
+  let wasInvalid = false;
+  let firstBaseline = false;
+  let superseded = false;
   try {
-    await saveMonitors(monitors);
+    const write = await mutateMonitors((list) => {
+      const idx = list.findIndex((m) => m.id === monitor.id);
+      if (idx === -1) return false;
+      const nowTs = Date.now();
+      wasInvalid = !!list[idx].invalid;
+      firstBaseline = list[idx].baselined === false;
+      superseded = baselineSuperseded(outcome, list[idx]);
+      if (superseded) {
+        dbg('[333 Watcher] change already recorded by another device, notification suppressed:', monitor.url);
+      }
+      const changeEventSeq = (outcome.changed && !superseded) ? nextEventSequence(list[idx].eventSeq) : (Number(list[idx].eventSeq) || 0);
+      // 恢复事件也消耗一个序号，避免同一监控多次“失效 -> 恢复”被合并。
+      const eventSeq = wasInvalid ? nextEventSequence(changeEventSeq) : changeEventSeq;
+      const update = superseded
+        ? updateWithoutSupersededBaseline(outcome, list[idx])
+        : outcome.update;
+      list[idx] = {
+        ...list[idx],
+        ...update,
+        eventSeq,
+        lastCheck: checkedAt,
+        lastCheckTime: nowTs,
+        nextCheckTime: nowTs + Math.max(1, Number(list[idx].interval) || DEFAULT_INTERVAL) * 60000,
+        lastError: '',
+        failCount: 0,
+        invalid: false,
+        invalidReason: '',
+        invalidSince: null,
+        baselined: true
+      };
+      saved = list[idx];
+      return true;
+    });
+    if (!write.saved) return 'error';
   } catch (err) {
     // 基线未能落盘时不发通知：这一轮的变化会在下个周期重新检测到。
     console.error('[333 Watcher] check save failed:', monitor.id, err && err.message);
     return 'error';
   }
   if (wasInvalid) {
-    await notifyRecovered(monitors[idx]);
+    await notifyRecovered(saved);
   }
 
   // 新建/重建监控的第一次成功检查只建立基线，不发变化通知
@@ -857,15 +899,24 @@ async function checkMonitor(monitor) {
   if (outcome.changed) {
     const isValueType = type === 'element' || type === 'link' || type === 'download';
     if (isValueType) {
-      const confirmRes = await confirmChange(monitors[idx], outcome.update.lastValue);
+      const confirmRes = await confirmChange(saved, outcome.update.lastValue);
       if (!confirmRes.stable) {
         dbg('[333 Watcher] value unstable between two fetches, notification suppressed');
-        monitors[idx] = { ...monitors[idx], lastValue: confirmRes.value };
-        await saveMonitors(monitors);
+        // 抖动回写的基线同样要走互斥区，否则会覆盖这期间的其他改动。
+        try {
+          await mutateMonitors((list) => {
+            const idx = list.findIndex((m) => m.id === monitor.id);
+            if (idx === -1) return false;
+            list[idx] = { ...list[idx], lastValue: confirmRes.value };
+            return true;
+          });
+        } catch (err) {
+          console.error('[333 Watcher] flaky baseline save failed:', monitor.id, err && err.message);
+        }
         return 'flaky';
       }
     }
-    await notifyChange(monitors[idx], {
+    await notifyChange(saved, {
       oldValue: outcome.prevValue,
       newValue: outcome.update.lastValue
     });
@@ -1100,33 +1151,38 @@ async function notifyRecovered(monitor) {
   }, 'notif-recovered-' + monitor.id, '333 Watcher · 监控恢复');
 }
 async function markCheckFailure(monitorId, checkedAt, reason, kind) {
+  let toNotify = null;
   try {
-    const list = await getMonitors();
-    const i = list.findIndex((m) => m.id === monitorId);
-    if (i === -1) return kind === 'not-found' ? 'not-found' : 'error';
-    const prev = list[i];
-    const failCount = (Number(prev.failCount) || 0) + 1;
-    const wasInvalid = !!prev.invalid;
-    const nowTs = Date.now();
-    const shouldInvalid = failCount >= INVALID_THRESHOLD;
-    const eventSeq = shouldInvalid && !wasInvalid
-      ? nextEventSequence(prev.eventSeq)
-      : (Number(prev.eventSeq) || 0);
-    list[i] = {
-      ...prev,
-      lastError: reason,
-      failCount: failCount,
-      lastCheck: checkedAt,
-      lastCheckTime: nowTs,
-      nextCheckTime: nowTs + Math.max(1, Number(prev.interval) || DEFAULT_INTERVAL) * 60000,
-      invalid: wasInvalid || shouldInvalid,
-      invalidReason: (wasInvalid || shouldInvalid) ? reason : (prev.invalidReason || ''),
-      invalidSince: wasInvalid ? (prev.invalidSince || checkedAt) : (shouldInvalid ? checkedAt : (prev.invalidSince || null)),
-      eventSeq
-    };
-    await saveMonitors(list);
-    if (shouldInvalid && !wasInvalid) {
-      await notifyInvalid(list[i], reason + '（连续失败 ' + failCount + ' 次）');
+    const write = await mutateMonitors((list) => {
+      const i = list.findIndex((m) => m.id === monitorId);
+      if (i === -1) return false;
+      const prev = list[i];
+      const failCount = (Number(prev.failCount) || 0) + 1;
+      const wasInvalid = !!prev.invalid;
+      const nowTs = Date.now();
+      const shouldInvalid = failCount >= INVALID_THRESHOLD;
+      const eventSeq = shouldInvalid && !wasInvalid
+        ? nextEventSequence(prev.eventSeq)
+        : (Number(prev.eventSeq) || 0);
+      list[i] = {
+        ...prev,
+        lastError: reason,
+        failCount: failCount,
+        lastCheck: checkedAt,
+        lastCheckTime: nowTs,
+        nextCheckTime: nowTs + Math.max(1, Number(prev.interval) || DEFAULT_INTERVAL) * 60000,
+        invalid: wasInvalid || shouldInvalid,
+        invalidReason: (wasInvalid || shouldInvalid) ? reason : (prev.invalidReason || ''),
+        invalidSince: wasInvalid ? (prev.invalidSince || checkedAt) : (shouldInvalid ? checkedAt : (prev.invalidSince || null)),
+        eventSeq
+      };
+      // 通知在锁外发送：notifyInvalid 会读监控、写 history，不能在临界区内嵌套。
+      if (shouldInvalid && !wasInvalid) toNotify = { monitor: list[i], failCount };
+      return true;
+    });
+    if (!write.saved) return kind === 'not-found' ? 'not-found' : 'error';
+    if (toNotify) {
+      await notifyInvalid(toNotify.monitor, reason + '（连续失败 ' + toNotify.failCount + ' 次）');
     }
   } catch (err) {
     // 失败计数写不进去时不能假装成功：log 出来，便于在扩展里排查同步配额/离线问题。
@@ -1210,13 +1266,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const isHref = attr === 'href';
       const targetUrl = isHref ? TEST_URL_PREFIX + 'link' : TEST_URL_PREFIX + 'text';
       const legacyUrl = TEST_URL_PREFIX + 'demo';
-      const monitors = await getMonitors();
-      let m = monitors.find((x) => x.url === targetUrl);
-      if (!m) m = monitors.find((x) => x.url === legacyUrl && (x.attribute||'text') === attr);
-      if (m) {
-        sendResponse({ ok: true, mode: 'exists', id: m.id, attribute: attr });
-        return;
-      }
       const cur = await getTestValue(attr);
       const monitor = {
         id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
@@ -1236,8 +1285,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         nextCheckTime: 0,
         eventSeq: 0
       };
-      monitors.push(monitor);
-      await saveMonitors(monitors);
+      // 去重判断与写入必须在同一临界区内，否则并发下会建出两条同目标测试监控。
+      const write = await mutateMonitors((monitors) => {
+        const existing = monitors.find((x) => x.url === targetUrl)
+          || monitors.find((x) => x.url === legacyUrl && (x.attribute || 'text') === attr);
+        if (existing) return { mode: 'exists', id: existing.id };
+        monitors.push(monitor);
+        return { mode: 'added', id: monitor.id };
+      });
+      if (write.result.mode === 'exists') {
+        sendResponse({ ok: true, mode: 'exists', id: write.result.id, attribute: attr });
+        return;
+      }
       await chrome.alarms.create(ALARM_PREFIX + monitor.id, { delayInMinutes: 0.5, periodInMinutes: 1 });
       sendResponse({ ok: true, mode: 'added', id: monitor.id, attribute: attr });
     })();
@@ -1246,13 +1305,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'test-clear') {
     (async () => {
-      const monitors = await getMonitors();
-      const kept = monitors.filter((m) => !(m.url && m.url.startsWith(TEST_URL_PREFIX)));
-      const removed = monitors.length - kept.length;
-      await saveMonitors(kept);
-      for (const mm of monitors) if (mm.url && mm.url.startsWith(TEST_URL_PREFIX)) try { await chrome.alarms.clear(ALARM_PREFIX + mm.id); } catch {}
+      const write = await mutateMonitors((monitors) => {
+        const isTest = (m) => m.url && m.url.startsWith(TEST_URL_PREFIX);
+        const removedIds = monitors.filter(isTest).map((m) => m.id);
+        monitors.splice(0, monitors.length, ...monitors.filter((m) => !isTest(m)));
+        return removedIds;
+      });
       await chrome.storage.sync.remove([TEST_STORAGE_KEY_TEXT, TEST_STORAGE_KEY_HREF, TEST_STORAGE_KEY_LEGACY]);
-      sendResponse({ ok: true, removed });
+      for (const id of write.result) try { await chrome.alarms.clear(ALARM_PREFIX + id); } catch {}
+      sendResponse({ ok: true, removed: write.result.length });
     })();
     return true;
   }
@@ -1277,6 +1338,69 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: true, ...result });
       } catch (err) {
         sendResponse({ ok: false, error: err.message });
+      }
+    })();
+    return true;
+  }
+
+  // popup 的所有 monitors 写入都走这里：popup 与后台是两个 JS 上下文，进程内互斥锁
+  // 互不生效，只有让 background 成为唯一写者才能真正避免整键覆盖丢数据。
+  if (msg.type === 'mutate-monitors') {
+    (async () => {
+      try {
+        const write = await mutateMonitors((list) => {
+          if (msg.op === 'upsert') {
+            const m = msg.monitor;
+            if (!m || !m.id) return false;
+            const idx = list.findIndex((x) => x.id === m.id);
+            if (idx !== -1) {
+              list[idx] = m;
+              return { id: m.id, mode: 'updated' };
+            }
+            // 页面侧新增去重读的是旧快照，并发下仍可能撞上同 key 的既有监控：
+            // 这里按 monitorKey 再兜一次底，命中就更新那条，而不是建出重复项。
+            const sameKey = list.findIndex((x) => monitorKey(x) === monitorKey(m));
+            if (sameKey !== -1) {
+              const keptId = list[sameKey].id;
+              list[sameKey] = { ...m, id: keptId };
+              return { id: keptId, mode: 'updated' };
+            }
+            list.push(m);
+            return { id: m.id, mode: 'added' };
+          }
+          if (msg.op === 'remove') {
+            const before = list.length;
+            list.splice(0, list.length, ...list.filter((x) => x.id !== msg.id));
+            return { removed: before - list.length };
+          }
+          if (msg.op === 'set-interval') {
+            const interval = clampInterval(msg.interval, DEFAULT_INTERVAL);
+            list.forEach((x) => { x.interval = interval; });
+            return { updated: list.length };
+          }
+          if (msg.op === 'import-by-key') {
+            // 按 monitorKey 合并进“当前存储里的最新列表”，避免用页面旧快照整键覆盖。
+            const map = new Map(list.map((x) => [monitorKey(x), x]));
+            let added = 0;
+            for (const m of (Array.isArray(msg.monitors) ? msg.monitors : [])) {
+              if (!m) continue;
+              const key = monitorKey(m);
+              if (!map.has(key)) added++;
+              map.set(key, m);
+            }
+            list.splice(0, list.length, ...map.values());
+            return { added: added, total: map.size };
+          }
+          return false;
+        });
+        if (!write.saved) {
+          sendResponse({ ok: false, error: '未知的操作或参数无效' });
+          return;
+        }
+        sendResponse({ ok: true, ...write.result });
+      } catch (err) {
+        console.error('[333 Watcher] mutate monitors failed:', err);
+        sendResponse({ ok: false, error: err.message, code: err.code || 'STORAGE_ERROR' });
       }
     })();
     return true;

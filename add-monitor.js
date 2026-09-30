@@ -179,6 +179,23 @@ async function saveMonitors(monitors) {
   }
 }
 
+// monitors 整键读-改-写：popup 页面和后台是两个 JS 上下文，页面直写会整键覆盖掉后台刚写入的
+// 检查基线（丢监控 / 基线回滚 / 重复通知）。因此写入统一交给 background 串行化执行；
+// fallback 供无法与 background 通信时（如本地预览直开 html）由调用方自行直写。
+async function mutateMonitorsViaBackground(msg, fallback) {
+  if (!(hasChromeStorage && chrome.runtime && chrome.runtime.sendMessage)) {
+    await fallback();
+    return { ok: true, fallback: true };
+  }
+  const res = await chrome.runtime.sendMessage({ type: 'mutate-monitors', ...msg });
+  if (!res || res.ok !== true) {
+    const err = new Error((res && res.error) || '保存监控失败');
+    err.code = (res && res.code) || 'STORAGE_ERROR';
+    throw err;
+  }
+  return res;
+}
+
 // ---- 通知历史存储层（chrome.storage.sync，跨设备同步） ----
 const HISTORY_LIMIT = 50;
 const HISTORY_MAX_BYTES = 7000; // storage.sync 单 key 上限 8KB，留出余量
@@ -684,7 +701,7 @@ form.addEventListener('submit', async (e) => {
       updated.invalidSince = null;
       updated.baselined = false;
       monitors[idx] = updated;
-      await saveMonitors(monitors);
+      await mutateMonitorsViaBackground({ op: 'upsert', monitor: updated }, () => saveMonitors(monitors));
       await closePagePicker();
       dbg('[333 Watcher] Monitor updated:', updated);
       exitEditMode();
@@ -741,7 +758,7 @@ async function addMonitor(data) {
     eventSeq: 0
   };
   monitors.push(monitor);
-  await saveMonitors(monitors);
+  await mutateMonitorsViaBackground({ op: 'upsert', monitor: monitor }, () => saveMonitors(monitors));
   await closePagePicker();
   dbg('[333 Watcher] Monitor added:', monitor);
   await clearPendingPick();
@@ -804,7 +821,7 @@ confirmOverwriteBtn.addEventListener('click', async () => {
       updated.lastHash = '';
       updated.baselined = false;
       monitors[idx] = updated;
-      await saveMonitors(monitors);
+      await mutateMonitorsViaBackground({ op: 'upsert', monitor: updated }, () => saveMonitors(monitors));
       await closePagePicker();
       dbg('[333 Watcher] Monitor overwritten:', updated);
     }
@@ -1074,7 +1091,7 @@ bulkIntervalBtn.addEventListener('click', async () => {
     if (!confirmed) return;
 
     const updated = monitors.map((m) => ({ ...m, interval: DEFAULT_INTERVAL }));
-    await saveMonitors(updated);
+    await mutateMonitorsViaBackground({ op: 'set-interval', interval: DEFAULT_INTERVAL }, () => saveMonitors(updated));
     renderList();
     showStatus('已将 ' + updated.length + ' 个监控的检查间隔改为 500 分钟 ✓', false);
   } catch (err) {
@@ -1113,7 +1130,7 @@ async function removeMonitor(id) {
     if (!target) return;
     // 只删除用户点击的这一条；同一网址的其他元素监控应继续运行。
     const kept = monitors.filter((m) => m.id !== id);
-    await saveMonitors(kept);
+    await mutateMonitorsViaBackground({ op: 'remove', id: id }, () => saveMonitors(kept));
     // 立即清除对应 alarm，防止删除后仍被调度检查
     if (typeof chrome !== 'undefined' && chrome.alarms) {
       const removed = monitors.filter((m) => !kept.includes(m));
@@ -1215,18 +1232,21 @@ importConfirmBtn.addEventListener('click', async () => {
       throw new Error('格式不正确，请粘贴完整的导出内容');
     }
     const imported = data.monitors;
-    const current = await getMonitors();
-    const map = new Map(current.map((m) => [monitorKey(m), m]));
-    let added = 0;
+    const normalized = [];
     let skipped = 0;
     for (const raw of imported) {
       const m = normalizeImportedMonitor(raw);
       if (!m) { skipped++; continue; }
-      const key = monitorKey(m);
-      if (!map.has(key)) added++;
-      map.set(key, m);
+      normalized.push(m);
     }
-    await saveMonitors([...map.values()]);
+    // 合并由 background 用“存储里的最新列表”完成，避免页面旧快照整键覆盖。
+    const res = await mutateMonitorsViaBackground({ op: 'import-by-key', monitors: normalized }, async () => {
+      const current = await getMonitors();
+      const map = new Map(current.map((m) => [monitorKey(m), m]));
+      for (const m of normalized) map.set(monitorKey(m), m);
+      await saveMonitors([...map.values()]);
+    });
+    const added = res.added == null ? normalized.length : res.added;
     renderList();
     showMigrateStatus('导入成功：有效 ' + (imported.length - skipped) + ' 条，新增 ' + added + (skipped ? '，跳过无效 ' + skipped + ' 条' : ''));
   } catch (err) {
