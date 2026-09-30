@@ -234,4 +234,98 @@ function test() {
   console.log('add-monitor-review tests passed');
 }
 
+// ---------------------------------------------------------------------------
+// checkNow 的结果反馈必须在 renderList() 全量重建之后仍然可见。
+// renderList 会 listEl.innerHTML='' 再重建每一行，若反馈只写进旧节点，
+// 下一轮重建会连同节点一起删掉 —— 用户刚点"立即检查"就看不到任何结果。
+// 这里用一个 getElementById 会重复返回同一实例的 DOM 桩跑完整流程。
+// ---------------------------------------------------------------------------
+function testCheckNowFeedbackSurvivesRender() {
+  const byId = new Map();
+  const realMakeEl = makeEl;
+  const doc = {
+    getElementById: (id) => {
+      if (!byId.has(id)) byId.set(id, realMakeEl(id));
+      return byId.get(id);
+    },
+    createElement: (tag) => realMakeEl(tag),
+    querySelector: () => realMakeEl('sel'),
+    querySelectorAll: () => [],
+    addEventListener() {},
+    removeEventListener() {},
+    body: realMakeEl('body'),
+    documentElement: realMakeEl('html'),
+  };
+
+  // 监控 m1 已存在；check-now 返回 changed，走"渲染 + 反馈"这条最典型的路径。
+  const monitors = [{ id: 'm1', url: 'https://example.test/a', type: 'page', interval: 30 }];
+  const syncGet = async (key) => (key === 'monitors' ? { monitors } : {});
+
+  const ctx2 = vm.createContext({
+    chrome: {
+      runtime: {
+        id: 'test',
+        getManifest: () => ({ version: '0.0.0-test' }),
+        getURL: (p) => 'chrome-extension://test/' + p,
+        sendMessage: async (msg) => {
+          if (msg && msg.type === 'check-now') return { ok: true, result: 'changed' };
+          return { ok: true };
+        },
+        lastError: null,
+      },
+      storage: {
+        sync: { get: syncGet, set: async () => {}, remove: async () => {} },
+        local: { get: async () => ({}), set: async () => {}, remove: async () => {} },
+      },
+      tabs: { query: async () => [], sendMessage: async () => {}, create: () => {} },
+      scripting: { executeScript: async () => [] },
+      alarms: { create: () => {}, clear: async () => true, get: async () => null },
+      notifications: { create: () => {}, clear: async () => true },
+    },
+    console,
+    document: doc,
+    window: { addEventListener() {}, removeEventListener() {}, location: { href: 'https://example.test/' } },
+    location: { href: 'https://example.test/' },
+    navigator: { clipboard: null, userAgent: 'node' },
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    URL, JSON, Date, Math, Number, String, Object, Array, Set, Map, Promise,
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+    confirm: () => false,
+    alert: () => {},
+  });
+  ctx2.globalThis = ctx2;
+  vm.runInContext(source, ctx2, { filename: 'add-monitor.js' });
+
+  return (async () => {
+    const listEl = doc.getElementById('monitor-list');
+    const btn = makeEl('btn');
+    const feedback = makeEl('feedback');
+    // await 到 checkNow 结束：此时 renderList 已跑完，DOM 里是重建后的新节点。
+    await ctx2.checkNow('m1', btn, feedback);
+
+    // 找到重建后那一行的 feedback 节点。
+    const row = listEl.children[0];
+    assert.ok(row, 'renderList must have rebuilt the monitor row');
+    const info = row.children[0];
+    const rebuilt = info.children.find(
+      (c) => typeof c.className === 'string' && c.className.indexOf('watcher-feedback') !== -1
+    );
+    assert.ok(rebuilt, 'the rebuilt row must still contain a feedback element');
+    assert.equal(
+      rebuilt.textContent, '检测到变化，已发送通知 ✓',
+      'check-now result must survive the renderList rebuild'
+    );
+    assert.ok(
+      !(typeof rebuilt.classList.contains === 'function' && rebuilt.classList.contains('hidden')),
+      'the rebuilt feedback must be visible'
+    );
+    console.log('add-monitor checkNow feedback tests passed');
+  })();
+}
+
 test();
+testCheckNowFeedbackSurvivesRender().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

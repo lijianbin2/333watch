@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.40 - 监控增删改与导入)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.41 - 监控增删改与导入)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -913,6 +913,10 @@ function monitorUpdatedAt(m) {
   return 0;
 }
 
+// 检查结果反馈：renderList 是全量重建，所以反馈不能只写进旧 DOM 节点，
+// 要在重建前存下来，重建时再按监控 id 贴回新节点。
+let pendingCheckFeedback = null;
+
 async function renderList() {
   const monitors = (await getMonitors()).slice().sort((a, b) => monitorUpdatedAt(b) - monitorUpdatedAt(a));
   countEl.textContent = monitors.length;
@@ -921,6 +925,7 @@ async function renderList() {
   for (const m of monitors) {
     const li = document.createElement('li');
     li.className = 'watcher-item';
+    li.dataset.monitorId = m.id || '';
 
     const info = document.createElement('div');
     info.className = 'watcher-info';
@@ -1048,6 +1053,34 @@ async function renderList() {
     li.appendChild(actions);
     listEl.appendChild(li);
   }
+
+  // 反馈必须在本轮重建**结束之后**才贴：renderList 是 async，而调用方并不 await
+  // 它（init 的首屏渲染、检查结果、删除等都会并发触发），先完成的那一轮如果先贴
+  // 再被后完成的一轮 innerHTML='' 冲掉，结果就是"点了立即检查什么都没有"。
+  // 所以这里在同步建完所有节点后再按 id 贴，且不提前清空标记 —— 后完成的那一轮
+  // 读到同一个标记，照样会贴上。
+  if (pendingCheckFeedback) {
+    const fb = pendingCheckFeedback;
+    for (const li of Array.from(listEl.children)) {
+      const info = li.children[0];
+      if (!info) continue;
+      const target = Array.from(info.children).find(
+        (c) => c && typeof c.className === 'string' && c.className.indexOf('watcher-feedback') !== -1
+      );
+      if (!target) continue;
+      const isTarget = li.dataset && li.dataset.monitorId === fb.id;
+      if (isTarget) {
+        target.textContent = fb.text;
+        target.classList.toggle('error', !!fb.isError);
+        target.classList.remove('hidden');
+      } else {
+        // 其它行不该残留上一次检查的反馈。
+        target.textContent = '';
+        target.classList.remove('error');
+        target.classList.add('hidden');
+      }
+    }
+  }
 }
 
 // ---- 立即检查 ----
@@ -1065,25 +1098,25 @@ async function checkNow(id, btn, feedback) {
     if (!res || !res.ok) {
       showCheckFeedback(feedback, '检查失败：' + ((res && res.error) || '未知错误') + '，请查看 Service Worker 日志', true);
     } else if (res.result === 'changed') {
-      showCheckFeedback(feedback, '检测到变化，已发送通知 ✓', false);
+      pendingCheckFeedback = { id, text: '检测到变化，已发送通知 ✓', isError: false };
       renderUnread();
       renderList();
     } else if (res.result === 'not-found') {
-      showCheckFeedback(feedback, '未找到目标（已尝试自愈）；连续2次失败将通知失效', true);
+      pendingCheckFeedback = { id, text: '未找到目标（已尝试自愈）；连续2次失败将通知失效', isError: true };
       renderList();
     } else if (res.result === 'error') {
-      showCheckFeedback(feedback, '网络请求失败，请检查网址或网络；连续2次失败将通知失效', true);
+      pendingCheckFeedback = { id, text: '网络请求失败，请检查网址或网络；连续2次失败将通知失效', isError: true };
       renderList();
     } else if (res.result === 'flaky') {
       showCheckFeedback(feedback, '检测到抖动，已抑制通知（下次再确认）', false);
     } else if (res.result === 'baselined') {
-      showCheckFeedback(feedback, '首次检查：已建立基线（本次不通知）', false);
+      pendingCheckFeedback = { id, text: '首次检查：已建立基线（本次不通知）', isError: false };
       renderList();
     } else if (res.result === 'changed-elsewhere') {
-      showCheckFeedback(feedback, '检测到变化，但已由本机或另一台设备的检查记录，未重复通知', false);
+      pendingCheckFeedback = { id, text: '检测到变化，但已由本机或另一台设备的检查记录，未重复通知', isError: false };
       renderList();
     } else {
-      showCheckFeedback(feedback, '暂无变化', false);
+      pendingCheckFeedback = { id, text: '暂无变化', isError: false };
       renderList();
     }
   } catch (err) {

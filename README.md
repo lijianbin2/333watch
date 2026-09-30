@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.40**
+当前版本：**v0.6.41**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -246,7 +246,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.40"
+$version = "0.6.41"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -267,6 +267,24 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.41
+
+- 修复**「立即检查」的检查结果反馈一闪即逝，点完什么也没看到**。
+  - 根因：`checkNow()` 先 `showCheckFeedback()` 把结果写进 DOM 节点，紧接着
+    `renderList()` 执行 `listEl.innerHTML = ''` 并重建每一行（新行的 feedback 一律
+    `hidden`）。7 条结果分支里有 6 条是「先写反馈、再重建」，消息在用户看到之前
+    就随旧节点一起被删掉了 —— 连「未找到目标」「网络请求失败」这类**必须让用户
+    知道的错误提示**也一起消失。
+  - 深层原因：反馈只在**建行过程中**贴回是不够的。`renderList` 是 `async` 且调用方
+    **不 await** 它，init 的首屏渲染、检查结果、删除等会并发触发多轮重建；先完成的
+    那轮即使贴上了反馈，也会被后完成的那轮 `innerHTML=''` 整片冲掉。
+  - 修复：把反馈改为在本轮**建完所有节点之后**再按监控 id 贴（`li.dataset.monitorId`），
+    且**不提前清空**标记 —— 后完成的那一轮读到同一个标记，照样会贴上。
+    非目标行的旧反馈同时被清掉，避免"结果串到别的监控上"。
+- 测试：新增 `checkNow` 回归测试，用会重复返回同一实例的 DOM 桩跑完整
+  `check-now → renderList` 流程，断言重建后的行里反馈仍可见且文案正确。
+  已用 `git stash` 验证修复前必然失败（实际值为空字符串）。
 
 ### v0.6.40
 

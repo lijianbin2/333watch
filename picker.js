@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - 元素选择器 Content Script v0.6.40
+ * 333 Watcher - 元素选择器 Content Script v0.6.41
  * 修复：微信文档等 Vue 页面选不到的问题
  */
 (function () {
@@ -32,7 +32,7 @@
   appendSafe(overlay);
   appendSafe(tip);
   appendSafe(badge);
-    console.log('[333 Watcher] picker overlay injected v0.6.40', overlay, tip, badge, location.href);
+    console.log('[333 Watcher] picker overlay injected v0.6.41', overlay, tip, badge, location.href);
 
   // 下载链接的选择器：扩展名保底（版本升级改名后仍然命中），再加文件名词干做区分。
   // 只用 `a[href$=".exe"]` 时，多下载项页面（多版本、多架构、不同产品）永远命中
