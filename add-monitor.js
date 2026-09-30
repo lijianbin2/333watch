@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.24 - baseline supersede guard)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.25 - claim arbitration and history write lock)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -248,7 +248,9 @@ async function pruneHistory() {
 async function renderUnread() {
   await pruneHistory();
   // 尚未确认投递的事件认领不算提醒，避免失败/竞争时出现幽灵未读。
-  const history = (await getHistory()).filter((h) => !h || !h.pending);
+  // 注意：`h && !h.pending` 才会剔除 null 记录；写成 `!h || !h.pending` 会把 null 留下，
+  // 随后的 h.read 就会抛 TypeError。
+  const history = (await getHistory()).filter((h) => h && !h.pending);
   const unread = history.filter((h) => !h.read).length;
 
   unreadBadge.textContent = unread;
@@ -297,9 +299,26 @@ if (clearReadBtn) {
   });
 }
 
+// 优先让 background 写 history：它的写操作共用一把互斥锁，
+// 不会把后台刚写入的事件认领整键覆盖掉。发送失败时才回退到本页直写。
+async function askBackgroundMarkRead(payload) {
+  if (!hasChromeStorage || !chrome.runtime || !chrome.runtime.sendMessage) return false;
+  try {
+    const res = await chrome.runtime.sendMessage(payload);
+    return !!(res && res.ok);
+  } catch (e) {
+    return false;
+  }
+}
+
 async function markHistoryItemRead(id) {
+  if (await askBackgroundMarkRead({ type: 'mark-history-read', id })) {
+    renderUnread();
+    if (historyExpanded) await renderHistoryList();
+    return;
+  }
   const history = await getHistory();
-  const item = history.find((h) => h.id === id);
+  const item = history.find((h) => h && h.id === id);
   if (!item || item.read) return;
   item.read = true;
   item.readAt = Date.now();
@@ -308,8 +327,13 @@ async function markHistoryItemRead(id) {
 }
 
 async function markAllHistoryRead() {
+  if (await askBackgroundMarkRead({ type: 'mark-all-history-read' })) {
+    renderUnread();
+    if (historyExpanded) await renderHistoryList();
+    return;
+  }
   const history = await getHistory();
-  if (!history.some((h) => !h.read)) return;
+  if (!history.some((h) => h && !h.read)) return;
   // 不触碰尚未完成投递的事件认领，避免影响跨设备去重判断。
   await saveHistory(history.map((h) => (h && h.pending ? h : { ...h, read: true, readAt: Date.now() })));
   renderUnread();
@@ -349,7 +373,7 @@ function formatTime(iso) {
 }
 
 async function renderHistoryList() {
-  const history = (await getHistory()).filter((h) => !h || !h.pending);
+  const history = (await getHistory()).filter((h) => h && !h.pending);
   historyList.innerHTML = '';
 
   if (history.length === 0) {

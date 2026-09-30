@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.24 - baseline supersede guard)
+ * 333 Watcher - Background Service Worker (v0.6.25 - claim arbitration and history write lock)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -924,42 +924,78 @@ function hasSeenEvent(event, history) {
 }
 
 async function claimNotificationEvent(event, record) {
-  const history = await getHistory();
-  if (hasSeenEvent(event, history)) {
-    return { claimed: false, reason: 'already-recorded' };
-  }
-  const claim = {
-    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
-    name: record.name,
-    url: record.url,
-    time: new Date().toISOString(),
-    claimAt: Date.now(),
-    message: record.message,
-    eventKey: event.eventKey,
-    kind: record.kind || 'change',
-    read: false,
-    pending: true
-  };
-  await saveHistory([claim, ...history]);
-  return { claimed: true, claimId: claim.id };
+  return withHistoryLock(async () => {
+    const history = await getHistory();
+    if (hasSeenEvent(event, history)) {
+      return { claimed: false, reason: 'already-recorded' };
+    }
+    const claim = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+      name: record.name,
+      url: record.url,
+      time: new Date().toISOString(),
+      claimAt: Date.now(),
+      message: record.message,
+      eventKey: event.eventKey,
+      kind: record.kind || 'change',
+      read: false,
+      pending: true
+    };
+    await saveHistory([claim, ...history]);
+    return { claimed: true, claimId: claim.id };
+  });
+}
+
+/**
+ * 同一 eventKey 出现多个并发认领时的确定性仲裁。
+ *
+ * storage.sync 是整键后写覆盖：若 B 在 A 写入之后才写入，B 的快照里已含 A 的认领，
+ * 于是两条 pending 认领会同时存在；只判断“自己的认领还在”会让两台设备都发通知。
+ * 这里按 claimAt、再按 id 做全序比较，所有设备算出同一个赢家，只有赢家发送。
+ */
+function pickClaimWinner(claims) {
+  return claims.slice().sort((a, b) => {
+    const ta = Number(a && a.claimAt) || 0;
+    const tb = Number(b && b.claimAt) || 0;
+    if (ta !== tb) return ta - tb;
+    return String((a && a.id) || '') < String((b && b.id) || '') ? -1 : 1;
+  })[0];
+}
+
+function rivalClaimsOf(event, history, claimId) {
+  return (Array.isArray(history) ? history : []).filter(h => (
+    h && h.eventKey === event.eventKey && h.id !== claimId && isActiveClaim(h)
+  ));
 }
 
 async function completeNotificationClaim(claimId, delivered) {
   if (!claimId) return;
-  const history = await getHistory();
-  const next = history.map(h => {
-    if (!h || h.id !== claimId) return h;
-    const updated = { ...h, pending: false };
-    if (delivered) updated.delivered = true;
-    else updated.failed = true;
-    return updated;
+  return withHistoryLock(async () => {
+    const history = await getHistory();
+    const next = history.map(h => {
+      if (!h || h.id !== claimId) return h;
+      const updated = { ...h, pending: false };
+      if (delivered) updated.delivered = true;
+      else updated.failed = true;
+      return updated;
+    });
+    if (!delivered) {
+      // 发送失败时删除认领，让下一次检查可以重试。
+      await saveHistory(next.filter(h => !h || h.id !== claimId));
+    } else {
+      await saveHistory(next);
+    }
   });
-  if (!delivered) {
-    // 发送失败时删除认领，让下一次检查可以重试。
-    await saveHistory(next.filter(h => !h || h.id !== claimId));
-  } else {
-    await saveHistory(next);
-  }
+}
+
+// 输掉仲裁时撤回自己的认领，避免赢家被这条残留 pending 挡住。
+async function releaseNotificationClaim(claimId) {
+  if (!claimId) return;
+  return withHistoryLock(async () => {
+    const history = await getHistory();
+    if (!history.some(h => h && h.id === claimId)) return;
+    await saveHistory(history.filter(h => !h || h.id !== claimId));
+  });
 }
 
 async function notifyOnce(event, record, notifId, title) {
@@ -979,6 +1015,15 @@ async function notifyOnce(event, record, notifId, title) {
     const own = latest.find(h => h && h.id === claim.claimId);
     if (!own) {
       return { ok: true, skipped: true, error: null };
+    }
+    const rivals = rivalClaimsOf(event, latest, claim.claimId);
+    if (rivals.length) {
+      const winner = pickClaimWinner([own, ...rivals]);
+      if (winner && winner.id !== claim.claimId) {
+        dbg('[333 Watcher] notification claim lost arbitration:', event.eventKey);
+        await releaseNotificationClaim(claim.claimId);
+        return { ok: true, skipped: true, error: null };
+      }
     }
     const result = await sendNotification(notifId, title, record.message);
     await completeNotificationClaim(claim.claimId, result.ok);
@@ -1221,6 +1266,42 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // 标记已读同样走 background：让 history 的所有写操作共用一把进程内互斥锁，
+  // 避免 popup 的整键读-改-写覆盖掉后台刚写入的事件认领。
+  if (msg.type === 'mark-history-read' || msg.type === 'mark-all-history-read') {
+    (async () => {
+      try {
+        const result = await withHistoryLock(async () => {
+          const history = await getHistory();
+          if (msg.type === 'mark-history-read') {
+            const item = history.find((h) => h && h.id === msg.id);
+            // 未完成投递的认领不是提醒，既不展示也不应被标记已读。
+            if (!item || item.read || item.pending) return { updated: 0 };
+            item.read = true;
+            item.readAt = Date.now();
+            await saveHistory(history);
+            return { updated: 1 };
+          }
+          // 不触碰尚未完成投递的事件认领，避免影响跨设备去重判断。
+          let updated = 0;
+          const next = history.map((h) => {
+            if (!h || typeof h !== 'object' || h.pending || h.read) return h;
+            updated++;
+            return { ...h, read: true, readAt: Date.now() };
+          });
+          if (updated > 0) await saveHistory(next);
+          return { updated };
+        });
+        await updateBadge();
+        sendResponse({ ok: true, ...result });
+      } catch (err) {
+        console.error('[333 Watcher] mark history read failed:', err);
+        sendResponse({ ok: false, error: err.message });
+      }
+    })();
+    return true;
+  }
+
   // 元素点选后直接在页面内保存（来自 picker.js 浮层）
   if (msg.type === 'save-element-monitor') {
     (async () => {
@@ -1273,7 +1354,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.24)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.25)');
 
 
 
@@ -1302,43 +1383,57 @@ async function saveHistory(history) {
   await chrome.storage.sync.set({ [HISTORY_KEY]: list });
 }
 
+// history 是整键读-改-写，跨设备并发时后写者会覆盖先写者。
+// 所有写入统一走这把进程内互斥锁，配合下面的确定性仲裁，把并发写入串行化。
+let _historyLock = Promise.resolve();
+function withHistoryLock(fn) {
+  const run = _historyLock.then(() => fn(), () => fn());
+  _historyLock = run.then(() => {}, () => {});
+  return run;
+}
+
 // 清理已读通知：超过保留期后自动删除，避免历史无限累积
 async function pruneHistory() {
-  try {
-    const history = await getHistory();
-    if (!history.length) return;
-    const cutoff = Date.now() - HISTORY_READ_RETENTION_MS;
-    const kept = history.filter((h) => {
-      // 崩溃或进程被杀留下的未完成认领，不再具备抑制作用，直接丢弃。
-      if (h && h.pending && !isActiveClaim(h)) return false;
-      if (!h.read) return true;
-      const readAt = Number(h.readAt) || new Date(h.time).getTime() || 0;
-      return readAt >= cutoff;
-    });
-    if (kept.length !== history.length) {
-      await saveHistory(kept);
-      dbg('[333 Watcher] history pruned:', history.length - kept.length, 'read item(s)');
+  return withHistoryLock(async () => {
+    try {
+      const history = await getHistory();
+      if (!history.length) return;
+      const cutoff = Date.now() - HISTORY_READ_RETENTION_MS;
+      const kept = history.filter((h) => {
+        // 崩溃或进程被杀留下的未完成认领，不再具备抑制作用，直接丢弃。
+        if (h && h.pending && !isActiveClaim(h)) return false;
+        if (!h || typeof h !== 'object') return false;
+        if (!h.read) return true;
+        const readAt = Number(h.readAt) || new Date(h.time).getTime() || 0;
+        return readAt >= cutoff;
+      });
+      if (kept.length !== history.length) {
+        await saveHistory(kept);
+        dbg('[333 Watcher] history pruned:', history.length - kept.length, 'read item(s)');
+      }
+    } catch (err) {
+      console.error('[333 Watcher] history prune failed:', err);
     }
-  } catch (err) {
-    console.error('[333 Watcher] history prune failed:', err);
-  }
+  });
 }
 
 async function clearReadHistory() {
-  try {
-    const history = await getHistory();
-    if (!history.length) return { removed: 0, kept: 0 };
-    const kept = history.filter((h) => !h.read);
-    const removed = history.length - kept.length;
-    if (removed > 0) {
-      await saveHistory(kept);
-      dbg('[333 Watcher] clear read history:', removed, 'item(s)');
+  return withHistoryLock(async () => {
+    try {
+      const history = await getHistory();
+      if (!history.length) return { removed: 0, kept: 0 };
+      const kept = history.filter((h) => h && typeof h === 'object' && !h.read);
+      const removed = history.length - kept.length;
+      if (removed > 0) {
+        await saveHistory(kept);
+        dbg('[333 Watcher] clear read history:', removed, 'item(s)');
+      }
+      return { removed, kept: kept.length };
+    } catch (err) {
+      console.error('[333 Watcher] clear read history failed:', err);
+      return { removed: 0, kept: 0, error: err.message };
     }
-    return { removed, kept: kept.length };
-  } catch (err) {
-    console.error('[333 Watcher] clear read history failed:', err);
-    return { removed: 0, kept: 0, error: err.message };
-  }
+  });
 }
 
 async function ensurePruneAlarm() {
@@ -1402,7 +1497,9 @@ async function migrateHistoryToSync() {
 async function updateBadge() {
   await pruneHistory();
   // 未完成的跨设备认领尚未确认投递，不计入未读数。
-  const history = (await getHistory()).filter((h) => !h || !h.pending);
+  // 注意：`h && !h.pending` 才会剔除 null 记录；写成 `!h || !h.pending` 会把 null 留下，
+  // 随后的 h.read 就会抛 TypeError。
+  const history = (await getHistory()).filter((h) => h && !h.pending);
   const unread = history.filter((h) => !h.read).length;
   await chrome.action.setBadgeBackgroundColor({ color: '#1f6feb' });
   await chrome.action.setBadgeText({ text: unread > 0 ? String(unread) : '' });

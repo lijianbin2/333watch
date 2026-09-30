@@ -80,6 +80,17 @@ let currentFetch = async () => { throw new Error('network disabled in unit test'
 context.fetch = (...args) => currentFetch(...args);
 context.__setFetch = (fn) => { currentFetch = fn; };
 
+// 派发一条 runtime 消息，返回 sendResponse 的结果。
+function sendMessage(msg) {
+  const handler = listeners.runtime[0];
+  assert.equal(typeof handler, 'function', 'background must register an onMessage listener');
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('no response for ' + msg.type)), 2000);
+    const keep = handler(msg, {}, (res) => { clearTimeout(timer); resolve(res); });
+    if (keep !== true) { clearTimeout(timer); resolve(undefined); }
+  });
+}
+
 async function test() {
   assert.equal(context.nextEventSequence(undefined), 1);
   assert.equal(context.nextEventSequence(0), 1);
@@ -152,6 +163,33 @@ async function test() {
   );
   assert.equal(pageUpdate.lastHash, undefined, 'page baselines must also be preserved when superseded');
 
+  // 认领仲裁：多条同 eventKey 的并发认领必须选出同一个赢家。
+  const nowMs = Date.now();
+  const claimA = { id: 'aaa', eventKey: 'k1', claimAt: nowMs, pending: true };
+  const claimB = { id: 'bbb', eventKey: 'k1', claimAt: nowMs + 1000, pending: true };
+  const claimC = { id: 'ccc', eventKey: 'k1', claimAt: nowMs, pending: true };
+  assert.equal(context.pickClaimWinner([claimB, claimA]).id, 'aaa', 'the earliest claim wins');
+  assert.equal(
+    context.pickClaimWinner([claimA, claimB]).id,
+    context.pickClaimWinner([claimB, claimA]).id,
+    'arbitration must not depend on array order'
+  );
+  assert.equal(
+    context.pickClaimWinner([claimA, claimC]).id,
+    'aaa',
+    'a claimAt tie must be broken deterministically by id'
+  );
+  assert.deepEqual(
+    context.rivalClaimsOf({ eventKey: 'k1' }, [claimA, claimB, { id: 'x', eventKey: 'k2', pending: true }], 'aaa').map((h) => h.id),
+    ['bbb'],
+    'rivals must exclude the own claim and other event keys'
+  );
+  assert.deepEqual(
+    context.rivalClaimsOf({ eventKey: 'k1' }, [claimA, { id: 'old', eventKey: 'k1', claimAt: nowMs - 10 * 60 * 1000, pending: true }], 'aaa'),
+    [],
+    'an expired rival claim must not win arbitration'
+  );
+
   syncStore.clear();
   syncStore.set('history', [{ url: eventBase.url, message: first.message, read: true }]);
   assert.equal(context.hasSeenEvent(first, syncStore.get('history')), true, 'legacy read history should suppress a matching event');
@@ -199,6 +237,95 @@ async function test() {
   assert.equal(staleClaimNotify.ok, true);
   assert.notEqual(staleClaimNotify.skipped, true, 'an expired claim must not block the notification');
   assert.equal(notificationCount, 2);
+
+  // 端到端仲裁：本机认领成功后，另一台设备的认领也落到 history 里，
+  // 两条 pending 并存时只有确定性赢家发送，另一台必须撤回自己的认领。
+  syncStore.clear();
+  notificationCount = 0;
+  const base = Date.now() - 5000;
+  const winnerClaim = {
+    id: 'winner-claim',
+    url: eventBase.url,
+    message: next.message,
+    eventKey: next.eventKey,
+    claimAt: base,
+    pending: true,
+    read: false
+  };
+  const originalSet = context.chrome.storage.sync.set;
+  let firstWrite = true;
+  context.chrome.storage.sync.set = async (values) => {
+    if (firstWrite && Array.isArray(values.history)) {
+      firstWrite = false;
+      // 本机先写入自己的（较晚的）认领，随后另一台设备的认领也落盘。
+      await originalSet(values);
+      const mine = values.history[0];
+      await originalSet({ history: [mine, winnerClaim] });
+      return;
+    }
+    return originalSet(values);
+  };
+  const arbitrated = await context.notifyOnce(next, { ...notifyRecord, message: next.message }, 'notif-page-1', '333 Watcher');
+  context.chrome.storage.sync.set = originalSet;
+  assert.equal(arbitrated.ok, true);
+  assert.equal(arbitrated.skipped, true, 'the losing claim must not send a notification');
+  assert.equal(notificationCount, 0, 'the losing claim must not notify at all');
+  assert.equal(
+    syncStore.get('history').some((h) => h.id !== 'winner-claim' && h.eventKey === next.eventKey),
+    false,
+    'the losing claim must be released so it cannot block the winner'
+  );
+
+  // 并发认领不得丢记录：history 写入已串行化，最后写入的认领必须保留。
+  syncStore.clear();
+  const concurrent = await Promise.all([
+    context.claimNotificationEvent({ eventKey: 'par-1' }, { name: 'a', url: 'https://example.test/a', message: 'm1' }),
+    context.claimNotificationEvent({ eventKey: 'par-2' }, { name: 'b', url: 'https://example.test/b', message: 'm2' }),
+    context.claimNotificationEvent({ eventKey: 'par-3' }, { name: 'c', url: 'https://example.test/c', message: 'm3' }),
+  ]);
+  assert.equal(concurrent.filter((c) => c.claimed).length, 3, 'all distinct events must be claimed');
+  const keptPar = syncStore.get('history');
+  assert.equal(keptPar.length, 3, 'serialized history writes must not lose concurrent claims');
+  for (const key of ['par-1', 'par-2', 'par-3']) {
+    assert.equal(
+      keptPar.some((h) => h.eventKey === key),
+      true,
+      'claim ' + key + ' must survive concurrent writes'
+    );
+  }
+
+  // popup 的“全部已读”必须走 background，且不得把未完成投递的认领标记为已读。
+  syncStore.clear();
+  const claimNow = Date.now();
+  syncStore.set('history', [
+    { id: 'r1', name: 'a', url: 'https://example.test/a', message: 'm1', eventKey: 'r-1', read: false },
+    { id: 'r2', name: 'b', url: 'https://example.test/b', message: 'm2', eventKey: 'r-2', claimAt: claimNow, pending: true, read: false },
+    { id: 'r3', name: 'c', url: 'https://example.test/c', message: 'm3', eventKey: 'r-3', read: true, readAt: claimNow },
+    null,
+  ]);
+  const markAll = await sendMessage({ type: 'mark-all-history-read' });
+  assert.equal(markAll.ok, true, 'mark-all-history-read must respond ok');
+  assert.equal(markAll.updated, 1, 'only the unread non-pending record may be marked read');
+  const afterMarkAll = syncStore.get('history');
+  assert.equal(afterMarkAll.find((h) => h && h.id === 'r1').read, true, 'unread record must become read');
+  assert.equal(afterMarkAll.find((h) => h && h.id === 'r2').read, false, 'a pending claim must stay unread');
+  assert.equal(afterMarkAll.find((h) => h && h.id === 'r2').pending, true, 'a pending claim must not be mutated');
+  assert.equal(
+    afterMarkAll.some((h) => h === null),
+    false,
+    'null history entries must not crash the mark-read path and should be pruned'
+  );
+
+  const markOne = await sendMessage({ type: 'mark-history-read', id: 'r3' });
+  assert.equal(markOne.ok, true);
+  assert.equal(markOne.updated, 0, 'an already-read record must not be updated again');
+  const markPending = await sendMessage({ type: 'mark-history-read', id: 'r2' });
+  assert.equal(markPending.ok, true);
+  assert.equal(
+    syncStore.get('history').find((h) => h && h.id === 'r2').read,
+    false,
+    'marking a single pending claim must not mark it read'
+  );
 
   // pruneHistory 应清除过期未完成的认领。
   syncStore.set('history', [{

@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.24**
+当前版本：**v0.6.25**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -249,7 +249,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.24"
+$version = "0.6.25"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -270,6 +270,15 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.25
+
+- 修复跨设备并发认领的残余重复通知：`storage.sync` 是整键后写覆盖，两台设备的 pending 认领可能同时存在。现按 `claimAt` + `id` 做确定性仲裁，只有赢家发送，输家撤回自己的认领；
+- 所有 `history` 写入统一走进程内互斥锁，认领、投递确认、清理、标记已读串行化，避免并发写互相覆盖丢记录；
+- popup 的「标记已读 / 全部已读」改为发给 background 处理，不再由页面直接整键覆写 `history`；
+- 修复未读过滤条件 `!h || !h.pending` 会保留 `null` 记录、随后 `h.read` 抛 `TypeError` 的崩溃路径；
+- 清理 `history` 中的 `null` / 非对象记录，标记已读不再误改未完成投递的认领；
+- 新增认领仲裁、并发写入不丢记录、标记已读保护认领的测试。
 
 ### v0.6.24
 
