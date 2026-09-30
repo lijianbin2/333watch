@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.26 - device-aware claim arbitration window)
+ * 333 Watcher - Background Service Worker (v0.6.27 - device-aware claim arbitration window)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -374,7 +374,6 @@ async function migrateDataUnlocked() {
         migrated = true;
       }
     }
-    await chrome.storage.sync.remove('watchers');
     dbg('[333 Watcher] migrated legacy watchers -> monitors');
   }
 
@@ -432,6 +431,12 @@ async function migrateDataUnlocked() {
   if (migrated || JSON.stringify(deduped) !== JSON.stringify(monitors)) {
     await saveMonitors(deduped);
     dbg('[333 Watcher] data migration done,', deduped.length, 'monitor(s)');
+  }
+
+  // 旧键必须等 monitors 真正写成功之后再删：saveMonitors 遇到配额不足会抛错，
+  // 先删 watchers 会让旧数据无处可寻，等于把迁移失败变成数据丢失。
+  if (Array.isArray(data.watchers)) {
+    await chrome.storage.sync.remove('watchers');
   }
 }
 
@@ -1582,7 +1587,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.26)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.27)');
 
 
 

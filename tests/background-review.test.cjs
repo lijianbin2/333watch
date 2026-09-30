@@ -752,6 +752,30 @@ async function test() {
   assert.equal(migrated.invalidReason, 'missing');
   assert.equal(migrated.invalidSince, '2026-09-24T00:00:00.000Z');
 
+  // 回归：迁移时写 monitors 失败（配额不足）绝不能顺手删掉 watchers 旧数据。
+  syncStore.clear();
+  syncStore.set('watchers', [{ id: 'w-1', name: 'legacy page', url: 'https://legacy.test/' }]);
+  const realSyncSet = chrome.storage.sync.set;
+  chrome.storage.sync.set = async () => { throw new Error('QUOTA_BYTES quota exceeded'); };
+  await assert.rejects(
+    () => context.migrateData(),
+    // 用校验函数而不是正则：错误对象来自 vm realm，跨 realm 的 instanceof 会失配。
+    (err) => err && err.code === 'SYNC_QUOTA',
+    'a failed migration write must surface the quota error'
+  );
+  chrome.storage.sync.set = realSyncSet;
+  assert.ok(
+    syncStore.has('watchers'),
+    'legacy watchers must survive a failed migration write (no data loss)'
+  );
+  assert.equal(syncStore.has('monitors'), false, 'a failed migration must not write monitors');
+
+  // 迁移写成功后才允许清理旧键。
+  await context.migrateData();
+  assert.equal(syncStore.has('watchers'), false, 'a successful migration clears the legacy key');
+  assert.equal(syncStore.get('monitors').length, 1, 'legacy watchers become monitors');
+  assert.equal(syncStore.get('monitors')[0].url, 'https://legacy.test');
+
   stopClock();
   console.log('background-review tests passed');
 }

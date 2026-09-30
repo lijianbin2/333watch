@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.26**
+当前版本：**v0.6.27**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -249,7 +249,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.26"
+$version = "0.6.27"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -270,6 +270,12 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.27
+
+- 修复迁移失败导致的数据丢失：旧版数据迁移时，代码先把 `watchers` 旧键删掉，再写新的 `monitors`。一旦写入遇到配额不足（例如监控过多、超出 Chrome 每项 8KB / 总量 100KB 上限），迁移会中断，而旧数据已经被删掉——旧监控既没迁移成功、也再也找不回来。现在改成**写入成功后才清理旧键**：写失败时旧数据原样保留，下次启动可重试迁移；
+- 新增对应回归测试（模拟写入抛配额错误，断言 `watchers` 仍然存在、`monitors` 未被写入；以及迁移成功后旧键被正确清理）。已验证该用例在旧的"先删后写"实现下会失败；
+- 清理未使用的常量 `FOREIGN_DEVICE_LOOKBACK_MS`（多设备判定改用心跳表后已不再需要）。
 
 ### v0.6.26
 
