@@ -13,6 +13,15 @@ const localStore = new Map();
 let notificationCount = 0;
 // offscreen 文档的生命周期状态：用于验证"查询失败也必须关闭"。
 let offscreenOpen = false;
+// 并发窗口闸门：把某一次 history 读挂起，用来构造"读-改-写"整键覆盖的竞态。
+// armedByLocalRead 让闸门只作用于 migrateHistoryToSync 那一次读（它是唯一
+// 先读 local history 再读 sync history 的路径），避免把 pruneHistory 的读也挂住。
+let awaitingLocalHistory = false;
+let historyGateArmed = false;
+let releaseHistoryGate = null;
+// 闸门默认关闭：只有显式置位才生效。否则既有的 onInstalled 用例会经由
+// migrateHistoryToSync 把闸门挂上，整条测试链就死等在那里。
+let historyGateRequested = false;
 // 结构化克隆：真实 chrome.storage 读出的是副本，读写不共享引用。
 const clone = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
 
@@ -84,11 +93,20 @@ const chrome = {
   storage: {
     sync: {
       get: async (key) => {
-        if (key == null) return Object.fromEntries([...syncStore].map(([k, v]) => [k, clone(v)]));
-        if (Array.isArray(key)) {
-          return Object.fromEntries(key.filter((k) => syncStore.has(k)).map((k) => [k, clone(syncStore.get(k))]));
+        const wantsHistory = key === 'history' || (Array.isArray(key) && key.includes('history'));
+        // 先按调用时刻取值再决定是否挂起：storage.get 返回的是"这次读到的值"，
+        // 被推迟的是后续执行。若挂起后才取值，读到的就是新数据，竞态根本不会发生。
+        let snap;
+        if (key == null) snap = Object.fromEntries([...syncStore].map(([k, v]) => [k, clone(v)]));
+        else if (Array.isArray(key)) {
+          snap = Object.fromEntries(key.filter((k) => syncStore.has(k)).map((k) => [k, clone(syncStore.get(k))]));
+        } else snap = syncStore.has(key) ? { [key]: clone(syncStore.get(key)) } : {};
+        if (wantsHistory && historyGateRequested && awaitingLocalHistory && !historyGateArmed) {
+          historyGateArmed = true;
+          awaitingLocalHistory = false;
+          await new Promise((res) => { releaseHistoryGate = res; });
         }
-        return syncStore.has(key) ? { [key]: clone(syncStore.get(key)) } : {};
+        return snap;
       },
       set: async (values) => Object.entries(values).forEach(([key, value]) => syncStore.set(key, clone(value))),
       remove: async (key) => {
@@ -97,6 +115,7 @@ const chrome = {
     },
     local: {
       get: async (key) => {
+        if (key === 'history') awaitingLocalHistory = true;
         if (key == null) return Object.fromEntries([...localStore].map(([k, v]) => [k, clone(v)]));
         if (Array.isArray(key)) {
           return Object.fromEntries(key.filter((k) => localStore.has(k)).map((k) => [k, clone(localStore.get(k))]));
@@ -1724,6 +1743,79 @@ async function test() {
     'a readable delivered ledger must still be merged with, not replaced by, the new marker'
   );
   syncStore.delete('deliveredEvents');
+
+  // ---------------- 迁移不能整键覆盖掉并发写入的认领 ----------------
+  // migrateHistoryToSync 把旧版本留在 storage.local 的历史合并进 sync，
+  // 同样是整键读-改-写。它是 saveHistory 的 9 个调用点里唯一没走
+  // withHistoryLock 的一个，而启动/安装时确实存在并发写方：
+  // runBadgeUpdate 是**独立**的 onInstalled/onStartup 监听器（与 1896 行那条
+  // 生命周期链并发），它走 updateBadge -> pruneHistory 整键写；storage.onChanged
+  // 触发同一条路径；开机补检的认领、popup 标记已读同样在写。
+  //
+  // 认领被抹掉的后果最严重：claimNotificationEvent 刚写下的 pending 记录
+  // 被迁移的过期快照整键覆盖，arbitrateClaim 随后读到"自己的认领不见了"
+  // （!own）直接判 skip —— 这次提醒被静默吞掉，用户永远收不到，也没有任何报错。
+  syncStore.clear();
+  localStore.clear();
+  // 时间戳一律用"当下"：readAt / claimAt 若落在 1970 年，pruneHistory 会以
+  // "已读超期" / "认领过期" 为由合法地清掉它们，那样就无法把丢失归因到迁移。
+  const migNow = vNow;
+  const survivor = {
+    id: 'keep-1', name: 'n', url: 'https://a.test/',
+    time: new Date(migNow - 5000).toISOString(), message: 'legacy', read: false,
+  };
+  syncStore.set('history', [plain(survivor)]);
+  localStore.set('history', [{
+    id: 'legacy-1', name: 'n', url: 'https://b.test/',
+    time: new Date(migNow - 4000).toISOString(), message: 'from local', read: false,
+  }]);
+
+  historyGateRequested = true;
+  historyGateArmed = false;
+  awaitingLocalHistory = false;
+  releaseHistoryGate = null;
+
+  // 启动迁移：它会在自己的 history 读上挂起，手里攥着一份"认领写入之前"的快照。
+  const migratePromise = context.migrateHistoryToSync();
+  for (let i = 0; i < 200 && !releaseHistoryGate; i++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.ok(
+    releaseHistoryGate,
+    'the migration must park on its history read, otherwise this test proves nothing'
+  );
+
+  // 挂起期间，另一条**真正走互斥锁**的路径写入一条认领。
+  // 必须走 claimNotificationEvent 而不是直接改 syncStore：直接赋值绕过了锁，
+  // 那样无论迁移是否加锁都会被覆盖，测不出修复的效果。
+  const claimPromise = context.claimNotificationEvent(
+    { eventKey: 'k1', url: 'https://c.test/', message: 'live claim' },
+    { name: 'n', url: 'https://c.test/', message: 'live claim', kind: 'change' }
+  );
+  for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+
+  releaseHistoryGate();
+  const claimRes = await claimPromise;
+  await migratePromise;
+  for (let i = 0; i < 40; i++) await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(claimRes && claimRes.claimed, true, 'the concurrent claim must be granted');
+  const finalIds = (syncStore.get('history') || []).map((h) => h && h.id);
+  assert.ok(
+    finalIds.includes(claimRes.claimId),
+    'the migration must not wipe a claim written while it held a stale snapshot, ' +
+      'or the notification is silently swallowed (final history: ' + JSON.stringify(finalIds) + ')'
+  );
+  // 反向断言：加锁不能把迁移本身的功能改掉 —— 旧记录仍要合并进来，
+  // 原有 sync 记录也不能丢。
+  assert.ok(finalIds.includes('legacy-1'), 'the migration must still merge the legacy local record');
+  assert.ok(finalIds.includes('keep-1'), 'the migration must not drop the pre-existing sync record');
+  assert.equal(
+    localStore.has('history'),
+    false,
+    'the migrated local history must still be cleared after a successful merge'
+  );
+  historyGateRequested = false;
 
   stopClock();
   console.log('background-review tests passed');

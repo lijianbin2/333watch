@@ -279,6 +279,32 @@ tar -tf $zip
 
 ### v0.6.49
 
+- 修复历史迁移会整键覆盖掉并发写入的认领，导致提醒被静默吞掉。
+  - `migrateHistoryToSync()` 把旧版本留在 `storage.local` 的历史合并进
+    `storage.sync`，同样是整键读-改-写。它是 `saveHistory()` 九个调用点里
+    **唯一没走 `withHistoryLock`** 的一个，而启动/安装时确实存在并发写方：
+    `runBadgeUpdate` 是**独立**的 `onInstalled` / `onStartup` 监听器
+    （与生命周期链并发执行），它走 `updateBadge` → `pruneHistory` 整键写；
+    `storage.onChanged` 触发同一条路径；开机补检的认领、popup 标记已读同样在写。
+  - 被抹掉的如果是认领，后果最严重：`claimNotificationEvent` 刚写下的
+    `pending` 记录被迁移的过期快照整键覆盖，`arbitrateClaim` 随后读到
+    "自己的认领不见了"（`!own`）便直接判 `skip` —— **这次提醒被静默吞掉，
+    用户永远收不到，扩展里也没有任何报错**。反向则是迁移结果被后来的写覆盖，
+    下次启动重复迁移。
+  - 现在迁移的 `sync` 读-改-写整段落在 `withHistoryLock` 里（`local` 读留在
+    锁外，那是另一个存储区，没必要占着 history 的锁）。
+- 回归测试用闸门把迁移那次 `history` 读挂起，构造出真实的并发窗口：
+  - 闸门必须**先按调用时刻取值再挂起**。若挂起后才取值，读到的就是并发写入
+    之后的新数据，竞态根本不会发生，测出来的"存活"是假的（第一版探针就栽在这里）。
+  - 并发写入方必须走真正的 `claimNotificationEvent`，不能直接改 `syncStore`：
+    直接赋值绕过了互斥锁，那么无论迁移是否加锁都会被覆盖，测不出修复效果。
+  - 时间戳一律取"当下"。若把 `readAt` / `claimAt` 设在 1970 年，
+    `pruneHistory` 会以"已读超期" / "认领过期"为由合法地清掉它们，
+    丢失就无法唯一归因到迁移。
+  - 闸门默认关闭，只在显式置位时生效，否则既有的 `onInstalled` 用例会经由
+    `migrateHistoryToSync` 把闸门挂上，整条测试链死等在那里。
+  - 断言不只看认领存活，还反向校验迁移本身没被改坏：旧记录仍要合并进来、
+    原有 `sync` 记录不能丢、迁移成功后 `local` 仍要清空。
 - 移除冗余的 `activeTab` 权限。代码里没有任何地方用到它：读当前标签页
   `url` / `title` 靠的是 `host_permissions` 的 `<all_urls>`（只对
   `http(s)` 生效，`/^https?:/` 守卫挡住 `chrome://`），注入拾取脚本用的

@@ -2078,11 +2078,25 @@ async function migrateHistoryToSync() {
     const localData = await chrome.storage.local.get(HISTORY_KEY);
     const localHistory = Array.isArray(localData[HISTORY_KEY]) ? localData[HISTORY_KEY] : [];
     if (!localHistory.length) return;
-    const syncData = await chrome.storage.sync.get(HISTORY_KEY);
-    const syncHistory = Array.isArray(syncData[HISTORY_KEY]) ? syncData[HISTORY_KEY] : [];
-    const merged = mergeHistoryLists(syncHistory, localHistory);
-    if (!merged.length) return;
-    await saveHistory(merged);
+    // 读-改-写必须整段落在 history 互斥区里。
+    // 迁移是整键覆盖写：它读到的快照一旦过期，就会把快照之后写入的记录一并抹掉。
+    // 而启动/安装时确实存在并发写方 —— runBadgeUpdate 是独立的 onInstalled/onStartup
+    // 监听器，会走 updateBadge -> pruneHistory 整键写；storage.onChanged 也会触发
+    // 同一条路径；开机补检的认领、popup 标记已读同样在写。
+    //
+    // 最坏后果是认领被抹掉：claimNotificationEvent 刚写下的 pending 记录被迁移的
+    // 旧快照覆盖，arbitrateClaim 随后读到"自己的认领不见了"（!own），直接判 skip
+    // —— 这次提醒被静默吞掉，用户永远收不到。反向则是迁移结果被后来的写覆盖，
+    // 下次启动重复迁移。
+    const merged = await withHistoryLock(async () => {
+      const syncData = await chrome.storage.sync.get(HISTORY_KEY);
+      const syncHistory = Array.isArray(syncData[HISTORY_KEY]) ? syncData[HISTORY_KEY] : [];
+      const next = mergeHistoryLists(syncHistory, localHistory);
+      if (!next.length) return null;
+      await saveHistory(next);
+      return next;
+    });
+    if (!merged) return;
     await chrome.storage.local.remove(HISTORY_KEY);
     dbg('[333 Watcher] history migrated local -> sync:', merged.length, 'item(s)');
   } catch (err) {
