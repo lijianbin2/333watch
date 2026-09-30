@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.32**
+当前版本：**v0.6.33**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -246,7 +246,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.32"
+$version = "0.6.33"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -267,6 +267,13 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.33
+
+- 修复下载链接监控盯错链接：选择器生成器（`picker.js` 首次拾取 + `offscreen.js` 选择器自愈）对任何 `.exe` 链接都返回同一个 `a[href$=".exe"]`。下载页同时提供多个下载项时（多版本 / 多架构 / 不同产品），`querySelector` 永远命中第一个 `a`——用户点的是第三个，监控盯的却是第一个：首次检查就会拿第一个的 href 和第三个的基线一比，**立刻误报一次"已变化"**，之后真正被监控的链接怎么变都不会被发现；
+- 新选择器形如 `a[href$=".exe"][href*="WeChatSetup"]`：扩展名保底，保证版本号变化后仍然命中；再加文件名词干做区分，避免不同产品/架构互相串。词干会剥掉末尾版本号（`WeChatSetup_4.0.6.19.exe` → `WeChatSetup`），**发新版本不会让选择器失效**；文件名区分度不足（`a.exe`）时不加标记，保持旧的宽松选择器；查询串与片段一律剥离，签名链接的 token 不会进选择器；
+- 修复 `cssEscape` 回退分支：`CSS.escape` 不可用时只把非法字符加反斜杠，不处理前导数字，id 为 `123abc` 时会生成非法选择器 `#123abc`，offscreen 侧 `querySelector` 直接抛错、整次元素读取失败。现在用十六进制转义处理首字符，行为与原生 `CSS.escape` 一致；
+- 新增两个测试套件：`tests/offscreen-review.test.cjs`（`buildSelector` 的下载链接分支 + `cssEscape` 回退，共 15 条断言）与 `tests/picker-review.test.cjs`（用最小 DOM 桩把 picker.js 整个跑起来，对内部 `getSelector` 做断言）。两组用例均已用 `git stash` 双向验证：在修复前的代码上必然失败。
 
 ### v0.6.32
 

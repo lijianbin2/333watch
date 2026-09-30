@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.32 - 链接提取修复)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.33 - 下载链接选择器修复)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）

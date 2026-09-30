@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - 元素选择器 Content Script v0.6.32
+ * 333 Watcher - 元素选择器 Content Script v0.6.33
  * 修复：微信文档等 Vue 页面选不到的问题
  */
 (function () {
@@ -32,7 +32,23 @@
   appendSafe(overlay);
   appendSafe(tip);
   appendSafe(badge);
-  console.log('[333 Watcher] picker overlay injected v0.6.32', overlay, tip, badge, location.href);
+  console.log('[333 Watcher] picker overlay injected v0.6.33', overlay, tip, badge, location.href);
+
+  // 下载链接的选择器：扩展名保底（版本升级改名后仍然命中），再加文件名词干做区分。
+  // 只用 `a[href$=".exe"]` 时，多下载项页面（多版本、多架构、不同产品）永远命中
+  // 第一个 a：用户点的是第三个，监控却盯住第一个——首次检查立刻误报一次
+  // "已变化"，之后真正的目标链接怎么变都不会被发现。
+  function downloadSelectorParts(href) {
+    var raw = String(href || '');
+    var path = raw.split(/[?#]/)[0];           // 签名链接的 token 每次都变，不能进选择器
+    var base = path.slice(path.lastIndexOf('/') + 1);
+    var dot = base.lastIndexOf('.');
+    if (dot <= 0) return null;
+    var stem = base.slice(0, dot);
+    var hint = stem.replace(/[._-]?v?\d+(?:[._-]\w+)*$/i, '');  // WeChatSetup_4.0.6.19 -> WeChatSetup
+    if ((hint.match(/[a-z]/gi) || []).length < 3) return null;   // 至少 3 个字母才有区分度
+    return { ext: base.slice(dot), hint: hint };
+  }
 
   function getSelector(el) {
     if (!el || !el.tagName) return 'body';
@@ -40,6 +56,8 @@
       var a = (el.closest && el.closest('a')) || el;
       var href = (a.getAttribute && a.getAttribute('href')) || '';
       if (href.indexOf('wechat_devtools') !== -1) return 'a[href*="wechat_devtools"]';
+      var parts = downloadSelectorParts(href);
+      if (parts) return 'a[href$="' + parts.ext + '"][href*="' + parts.hint + '"]';
       if (href.slice(-4) === '.exe') return 'a[href$=".exe"]';
       if (href) { try { var u = new URL(a.href); if (u.hostname.indexOf('wxqcloud') !== -1) return 'a[href*="wxqcloud"]'; } catch(e){} }
     }
