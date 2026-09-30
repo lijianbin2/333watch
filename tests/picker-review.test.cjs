@@ -83,12 +83,16 @@ function loadPicker() {
   };
   context.globalThis = context;
   vm.createContext(context);
-  // getSelector 是 IIFE 内部的函数，在收尾前挂出来供断言。
-  const patched = source.replace(/\n\}\)\(\);\s*$/, '\nwindow.__getSelector = getSelector;\n})();\n');
-  assert.notEqual(patched, source, 'picker.js 尾部结构变了，测试需要重新定位 getSelector 的挂载点');
+  // getSelector / cleanup 是 IIFE 内部的函数，在收尾前挂出来供断言。
+  const patched = source.replace(
+    /\n\}\)\(\);\s*$/,
+    '\nwindow.__getSelector = getSelector;\nwindow.__callCleanup = cleanup;\n})();\n'
+  );
+  assert.notEqual(patched, source, 'picker.js 尾部结构变了，测试需要重新定位内部函数的挂载点');
   vm.runInContext(patched, context);
   assert.equal(typeof win.__getSelector, 'function', 'getSelector must be reachable from the test');
-  return win.__getSelector;
+  assert.equal(typeof win.__callCleanup, 'function', 'cleanup must be reachable from the test');
+  return { getSelector: win.__getSelector, cleanup: win.__callCleanup, win: win };
 }
 
 function anchor(href) {
@@ -103,7 +107,8 @@ function anchor(href) {
 // 旧实现对任意 .exe 链接返回同一个 `a[href$=".exe"]`。下载页同时提供多个下载项时
 // （多版本 / 多架构 / 不同产品），用户点第三个，监控盯的却是第一个：首次检查就会
 // 拿第一个的 href 和第三个的基线一比，误报一次"已变化"，之后真目标怎么变都不知道。
-const getSelector = loadPicker();
+const loaded = loadPicker();
+const getSelector = loaded.getSelector;
 const sel1 = getSelector(anchor('/dl/WeChatSetup.exe'));
 assert.ok(
   sel1.includes('$=".exe"'),
@@ -165,5 +170,37 @@ for (const navHref of ['/docs/v1.2', '/users/a.b']) {
     'a low-signal navigation link must not become a bare extension selector: ' + navHref + ' -> ' + sel
   );
 }
+
+// ---------------- 发布版不得裸打 console ----------------
+// picker 跑在用户正在访问的任意页面里。发布版残留 console.log 有三重代价：
+// 把宿主页面 URL、选中元素的文字和链接写进别人的站点控制台（隐私），
+// 在对方站点的控制台里留下无法解释的第三方日志（观感），
+// 以及 console.log(overlay, tip, badge) 这种把 DOM 节点交给 devtools 持有 ——
+// 节点在 cleanup() 里 remove() 之后依然不会被回收（泄漏）。
+const bareLogs = source
+  .split('\n')
+  .map((line, i) => ({ line: line, n: i + 1 }))
+  .filter((x) => /(^|[^.\w])console\s*\.\s*log\s*\(/.test(x.line))
+  // dbg() 自己那一行是唯一豁免（它就是那个受 DEBUG 开关约束的包装）。
+  .filter((x) => !/function\s+dbg\s*\(/.test(x.line));
+assert.equal(
+  bareLogs.length,
+  0,
+  'picker.js must not call console.log directly in release builds, found:\n' +
+    bareLogs.map((x) => x.n + ': ' + x.line.trim()).join('\n')
+);
+
+// ---------------- cleanup 必须释放调试句柄 ----------------
+// 用户在同一页面反复点「选择元素」时 content script 上下文是复用的。
+// 旧实现把 overlay/tip/badge 挂在 window.__w333PickerDebug 上，cleanup 从不摘，
+// 于是每点一次选择器，window 上就多留一份指向已移除节点的活引用。
+assert.ok(loaded.win.__w333PickerDebug, 'the debug handle must exist while the picker is active');
+loaded.cleanup();
+assert.equal(
+  loaded.win.__w333PickerDebug,
+  undefined,
+  'cleanup must release the debug handle so repeated injections do not pile up DOM references'
+);
+assert.equal(loaded.win.__w333PickerActive, false, 'cleanup must clear the active flag');
 
 console.log('picker-review tests passed');

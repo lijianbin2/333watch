@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.45**
+当前版本：**v0.6.46**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -256,7 +256,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.45"
+$version = "0.6.46"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -277,6 +277,27 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.46
+
+- 修复元素选择器在**用户访问的任意页面**留下无条件 `console.log` 的问题。
+  - `picker.js` 是 content script，两处 `console.log` 不受发布版 `DEBUG` 开关约束：
+    注入时打印宿主页面 `location.href`，选中元素时打印完整 `pickResult`
+    （含元素文字、链接、页面标题、页面 URL）。这些内容会出现在**第三方站点自己的
+    控制台**里，用户既无法解释来源，也可能在自己的站点上无意暴露敏感 URL。
+  - 注入时那条日志还把 `overlay`、`tip`、`badge` 三个 DOM 节点直接传给 `console.log`。
+    DevTools 会对这些实参保持活引用，节点在 `cleanup()` 里 `remove()` 之后
+    依然不会被回收。用户在同一个页面反复点「选择元素」时
+    （content script 上下文复用），每次注入都留下一批这样的引用。
+  - 现在两处都改走 `dbg()`（`DEBUG = false` 时完全不输出），且不再把 DOM 节点
+    交给 `console.log`。调试时改 `picker.js` 顶部的 `DEBUG` 即可恢复。
+- 修复选择器调试句柄 `window.__w333PickerDebug` 永不释放的问题。它持有
+  `overlay` / `tip` / `badge` / `highlight` 的引用，而 `cleanup()` 从不摘除，
+  于是每次注入选择器都往 `window` 上多挂一份指向已移除节点的活引用。
+  `cleanup()` 现在会清空并删除该句柄。
+- 新增 `picker-review` 测试锁定这两点：发布版源码中不得出现裸 `console.log`，
+  且 `cleanup()` 之后调试句柄必须为空。两条断言均已用修复前的 `picker.js`
+  反向验证会失败。
 
 ### v0.6.45
 

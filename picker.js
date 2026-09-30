@@ -1,8 +1,14 @@
 /**
- * 333 Watcher - 元素选择器 Content Script v0.6.45
+ * 333 Watcher - 元素选择器 Content Script v0.6.46
  * 修复：微信文档等 Vue 页面选不到的问题
  */
 (function () {
+  // 发布版关闭信息日志，调试时改为 true。
+  // 这里必须是「按需」输出：picker 跑在用户正在访问的任意页面里，
+  // 无条件 console.log 会把宿主页面 URL 和元素内容写进别人的站点控制台。
+  var DEBUG = false;
+  function dbg(){ if (DEBUG) console.log.apply(console, ['[333 Watcher]'].concat(Array.prototype.slice.call(arguments))); }
+
   if (window.__w333PickerActive) {
     try { window.__w333PickerCleanup && window.__w333PickerCleanup(); } catch(e) {}
     try { document.querySelectorAll('[data-w333]').forEach(function(n){ n.remove(); }); } catch(e){}
@@ -32,7 +38,9 @@
   appendSafe(overlay);
   appendSafe(tip);
   appendSafe(badge);
-  console.log('[333 Watcher] picker overlay injected v0.6.45', overlay, tip, badge, location.href);
+  // 只在调试时打印，而且不打 DOM 节点本身：devtools 会对 console 里传入的
+  // 元素保持活引用，节点 cleanup() 之后也不会被回收。
+  dbg('picker overlay injected', location.href);
 
   // 下载链接的选择器：扩展名保底（版本升级改名后仍然命中），再加文件名词干做区分。
   // 只用 `a[href$=".exe"]` 时，多下载项页面（多版本、多架构、不同产品）永远命中
@@ -244,7 +252,7 @@
       selector: getSelector(el), attribute: defaultAttribute(el),
       pageUrl: location.href, pageTitle: document.title, pickedAt: new Date().toISOString()
     };
-    console.log('[333 Watcher] picked', pickResult);
+    dbg('picked', pickResult);
     stopPickMode();
     try { chrome.storage.sync.set({ pendingPick: pickResult }).then(function(){ showDialog(); }).catch(function(){ showDialog(); }); } catch(err){ showDialog(); }
   }
@@ -355,6 +363,10 @@
     try{ overlay.remove(); }catch(e){} try{ tip.remove(); }catch(e){} try{ badge && badge.remove(); }catch(e){}
     if(dialogHost) try{ dialogHost.remove(); }catch(e){}
     dialogHost=null; pickResult=null; window.__w333PickerActive=false;
+    // 调试句柄持有 overlay/tip/badge 的引用。不清掉的话，window 上会一直
+    // 挂着这几个已从文档移除的节点，页面反复点选择器就反复堆积。
+    try{ if(window.__w333PickerDebug){ window.__w333PickerDebug.overlay=window.__w333PickerDebug.tip=window.__w333PickerDebug.badge=window.__w333PickerDebug.highlight=null; } }catch(e){}
+    try{ delete window.__w333PickerDebug; }catch(e){ try{ window.__w333PickerDebug=undefined; }catch(e2){} }
     document.removeEventListener('keydown', onKey, true); window.removeEventListener('keydown', onKey, true);
     // 同一页面反复注入选择器时，content script 上下文是复用的：
     // 不摘掉监听器会每次注入都多留一个，指向已被清理的旧闭包。
