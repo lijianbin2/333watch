@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.42 - 监控增删改与导入)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.43 - 监控增删改与导入)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -115,6 +115,31 @@ function limitMonitorValue(value, attribute) {
   return text.length > max ? text.slice(0, max) : text;
 }
 
+// id 同时充当 alarm 名、通知 id 和检查锁的键，所以一旦重复：
+//   - 两条监控共用一个 alarm，syncAlarms 只建得出一个 → 其中一条再也不会被检查；
+//   - 通知 id 相同 → 后一条直接顶掉前一条，用户看到"少了一条提醒"；
+//   - findIndex(m.id === ...) 永远只命中第一条 → 基线写到错的监控上。
+// 同一份备份可以在多台机器上与各自独立创建的监控撞 id，所以导入合并时必须
+// 过这道闸（与 background 的 ensureUniqueMonitorIds 同一套语义）。
+function ensureUniqueMonitorIds(list) {
+  const used = new Set();
+  const repaired = [];
+  for (const m of list) {
+    if (!m || typeof m !== 'object') { repaired.push(m); continue; }
+    const id = String(m.id || '');
+    if (id && !used.has(id)) {
+      used.add(id);
+      repaired.push(m);
+      continue;
+    }
+    const fresh = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    dbg('[333 Watcher] monitor id 空/重复，重新发号:', id || '(空)', '->', fresh);
+    used.add(fresh);
+    repaired.push({ ...m, id: fresh });
+  }
+  return repaired;
+}
+
 function normalizeImportedMonitor(value) {
   if (!value || typeof value !== 'object') return null;
   const url = normalizeUrl(value.url || '').slice(0, MAX_URL_VALUE_CHARS);
@@ -158,6 +183,28 @@ function normalizeImportedMonitor(value) {
   };
 }
 
+// 把导入的监控按 monitorKey 合并进"存储里的当前列表"，并修好 id：
+//   - 命中已有 key 时保留本机 id（id 是 alarm 名 / 通知 id / 检查锁的键，
+//     换成备份里的 id 会让在途的认领和已建的 alarm 对不上）；
+//   - 整体去重 id，避免同一份备份在多台机器上与各自新建的监控撞 id。
+// 与 background 的 import-by-key 同一套语义（那边是主路径，这里是直写兜底）。
+function mergeImportedMonitors(current, normalized) {
+  const map = new Map(current.map((m) => [monitorKey(m), m]));
+  let added = 0;
+  for (const m of normalized) {
+    if (!m) continue;
+    const key = monitorKey(m);
+    const prev = map.get(key);
+    if (prev) {
+      map.set(key, { ...m, id: prev.id });
+      continue;
+    }
+    added++;
+    map.set(key, m);
+  }
+  return { merged: ensureUniqueMonitorIds([...map.values()]), added };
+}
+
 // ---- 监控存储层（chrome.storage.sync） ----
 async function getMonitors() {
   if (hasChromeStorage) {
@@ -183,10 +230,15 @@ function storageErrorMessage(err) {
 
 async function saveMonitors(monitors) {
   try {
+    // 所有页面直写都从这里出去，所以在这一道闸上统一去重 id：
+    // background 在导入合并 / 启动迁移 / 新增监控三个入口都做了这件事，
+    // 页面兜底若漏掉，同一份备份在两台机器上就会留下 id 冲突的表
+    // （两条监控共用一个 alarm、共用同一个通知 id）。顺带修掉已被写坏的状态。
+    const safe = ensureUniqueMonitorIds(monitors);
     if (hasChromeStorage) {
-      await chrome.storage.sync.set({ monitors });
+      await chrome.storage.sync.set({ monitors: safe });
     } else {
-      localStorage.setItem('monitors', JSON.stringify(monitors));
+      localStorage.setItem('monitors', JSON.stringify(safe));
     }
   } catch (err) {
     const friendly = new Error(storageErrorMessage(err));
@@ -200,8 +252,10 @@ async function saveMonitors(monitors) {
 // fallback 供无法与 background 通信时（如本地预览直开 html）由调用方自行直写。
 async function mutateMonitorsViaBackground(msg, fallback) {
   if (!(hasChromeStorage && chrome.runtime && chrome.runtime.sendMessage)) {
-    await fallback();
-    return { ok: true, fallback: true };
+    // 透传 fallback 的返回值：导入兜底要靠它回报真实的新增条数，
+    // 否则会退回"全部都是新增"，把覆盖掉的条数也算成新增。
+    const local = (await fallback()) || {};
+    return { ok: true, fallback: true, ...local };
   }
   const res = await chrome.runtime.sendMessage({ type: 'mutate-monitors', ...msg });
   if (!res || res.ok !== true) {
@@ -1315,11 +1369,11 @@ importConfirmBtn.addEventListener('click', async () => {
     // 合并由 background 用“存储里的最新列表”完成，避免页面旧快照整键覆盖。
     const res = await mutateMonitorsViaBackground({ op: 'import-by-key', monitors: normalized }, async () => {
       const current = await getMonitors();
-      const map = new Map(current.map((m) => [monitorKey(m), m]));
-      for (const m of normalized) map.set(monitorKey(m), m);
-      await saveMonitors([...map.values()]);
+      const { merged, added } = mergeImportedMonitors(current, normalized);
+      await saveMonitors(merged);
+      return { added };
     });
-    const added = res.added == null ? normalized.length : res.added;
+    const added = res && res.added != null ? res.added : normalized.length;
     renderList();
     showMigrateStatus('导入成功：有效 ' + (imported.length - skipped) + ' 条，新增 ' + added + (skipped ? '，跳过无效 ' + skipped + ' 条' : ''));
   } catch (err) {

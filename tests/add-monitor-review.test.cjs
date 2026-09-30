@@ -239,6 +239,46 @@ function test() {
     'selector-based monitors must keep their existing key shape'
   );
 
+  // ---------------- mergeImportedMonitors：页面侧导入兜底 ----------------
+  // 页面兜底（无法与 background 通信时直写）此前用 map.set 整体替换，既不保留
+  // 本机 id、也不去重 id，与 background 主路径行为不一致。
+  // 1) 命中已有 key 时必须保留本机 id —— id 是 alarm 名 / 通知 id / 检查锁的键。
+  const localMon = { id: 'local-1', url: 'https://example.test/h', type: 'page', interval: 30, name: '本机' };
+  const fromBackup = context.normalizeImportedMonitor({
+    id: 'backup-9', url: 'https://example.test/h', type: 'page', interval: 60, name: '备份',
+  });
+  const r1 = context.mergeImportedMonitors([localMon], [fromBackup]);
+  assert.equal(r1.added, 0, 'an already-known key must not count as added');
+  assert.equal(r1.merged.length, 1, 'an already-known key must merge, not duplicate');
+  assert.equal(
+    r1.merged[0].id, 'local-1',
+    'importing over an existing monitor must keep this machine id'
+  );
+  assert.equal(
+    r1.merged[0].interval, 60,
+    'the imported fields must still be applied to the merged monitor'
+  );
+
+  // 2) 备份里的 id 未必和本机其它监控不冲突：必须重新发号，而不是撞 id。
+  //    id 重复会让两条监控共用一个 alarm（其中一条再也不会被检查）、共用同一个
+  //    通知 id，且 findIndex(m.id === ...) 永远只命中第一条。
+  const clash = [
+    { id: 'dup', url: 'https://example.test/i', type: 'page', interval: 30 },
+    { id: 'dup', url: 'https://example.test/j', type: 'page', interval: 30 },
+  ];
+  const r2 = context.mergeImportedMonitors(clash, []);
+  const ids = r2.merged.map((m) => m.id);
+  assert.equal(new Set(ids).size, ids.length, 'monitor ids must be unique after a merge');
+  assert.notEqual(r2.merged[1].id, 'dup', 'the duplicate id must be re-minted');
+  assert.equal(
+    r2.merged[1].url, 'https://example.test/j',
+    're-minting must not disturb the monitor payload'
+  );
+
+  // 3) 空 id 也必须补发 —— 空的 id 会让 alarm 名退化成前缀本身。
+  const r3 = context.mergeImportedMonitors([{ id: '', url: 'https://example.test/k', type: 'page' }], []);
+  assert.ok(r3.merged[0].id, 'a monitor with an empty id must be given a fresh id');
+
   console.log('add-monitor-review tests passed');
 }
 

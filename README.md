@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.42**
+当前版本：**v0.6.43**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -246,7 +246,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.42"
+$version = "0.6.43"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -267,6 +267,28 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.43
+
+- 修复**页面侧导入兜底路径缺少 id 保护，可能写出 id 冲突的监控表**。
+  - 背景：导入的主路径是 background 的 `import-by-key`，它做两件页面兜底漏掉的
+    事 —— ① 命中已有 `monitorKey` 时**保留本机 id**（id 是 alarm 名 / 通知 id /
+    检查锁的键，换成备份里的 id 会让在途的认领和已建的 alarm 对不上）；
+    ② 对合并结果整体**去重 id**。页面的 fallback 此前只有一句
+    `map.set(monitorKey(m), m)`，两条都丢了。
+  - 危害：同一份备份可以在多台机器上与各自独立创建的监控撞 id。id 重复会让两条
+    监控共用一个 alarm（`syncAlarms` 只建得出一个 → 其中一条**再也不会被检查**）、
+    共用同一个通知 id（后一条直接顶掉前一条 → 用户看到"少了一条提醒"），且
+    `findIndex(m.id === ...)` 永远只命中第一条 → **基线写到错的监控上**。
+  - 修复：抽出页面侧的 `mergeImportedMonitors()`，与 background 的
+    `import-by-key` 同一套语义（保留本机 id + 整体去重）；并把 `ensureUniqueMonitorIds()`
+    提到 `saveMonitors()` 这个唯一出口上，让页面所有直写（新增 / 覆盖 / 删除 /
+    批量改间隔 / 导入兜底）都过这道闸，顺带修掉此前已被写坏的状态。
+  - 顺带修：`mutateMonitorsViaBackground()` 原先丢弃 fallback 的返回值，导致兜底
+    路径下"新增 N 条"会退回"全部都是新增"，把被覆盖的条数也算成新增。
+- 测试：新增导入合并的回归断言，逐条验证 ① 命中已有 key 时保留本机 id、
+  导入的字段仍生效；② 重复 id 被重新发号且不破坏监控内容；③ 空 id 被补发。
+  两条关键断言已分别单独反向验证（分别还原"不保留 id"和"不去重"，确认各自失败）。
 
 ### v0.6.42
 
