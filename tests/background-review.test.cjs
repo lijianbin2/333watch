@@ -7,9 +7,57 @@ const backgroundPath = path.join(__dirname, '..', 'background.js');
 const source = fs.readFileSync(backgroundPath, 'utf8');
 const listeners = { runtime: [], notifications: [], storage: [], alarms: [] };
 const syncStore = new Map();
+const localStore = new Map();
 let notificationCount = 0;
 // 结构化克隆：真实 chrome.storage 读出的是副本，读写不共享引用。
 const clone = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
+
+// ---------------- 虚拟时钟 ----------------
+// 跨设备认领仲裁是"在窗口内反复轮询存储"，必须能确定性地推进时间：
+// 若 setTimeout 立即执行，窗口永远走不到头，测试会死循环；
+// 若用真实定时器，5 秒窗口会把单测拖得很慢。这里改成虚拟时钟 +
+// setImmediate 驱动的时钟泵：到点的定时器立刻按（到期时间, 序号）顺序执行。
+let vNow = Date.now();
+let vTimerSeq = 0;
+const vTimers = new Map();
+const fakeSetTimeout = (fn, ms) => {
+  const id = ++vTimerSeq;
+  vTimers.set(id, { at: vNow + (Number(ms) || 0), fn });
+  return id;
+};
+const fakeClearTimeout = (id) => { vTimers.delete(id); };
+class VirtualDate extends Date {
+  constructor(...args) {
+    if (args.length === 0) super(vNow);
+    else super(...args);
+  }
+  static now() { return vNow; }
+}
+
+let clockRunning = false;
+function pumpOneTimer() {
+  let nextId = null;
+  for (const [id, timer] of vTimers) {
+    if (nextId === null || timer.at < vTimers.get(nextId).at) nextId = id;
+  }
+  if (nextId === null) return false;
+  const timer = vTimers.get(nextId);
+  vTimers.delete(nextId);
+  if (timer.at > vNow) vNow = timer.at;
+  timer.fn();
+  return true;
+}
+function startClock() {
+  if (clockRunning) return;
+  clockRunning = true;
+  const step = () => {
+    if (!clockRunning) return;
+    pumpOneTimer();
+    setImmediate(step);
+  };
+  setImmediate(step);
+}
+function stopClock() { clockRunning = false; }
 
 const chrome = {
   runtime: {
@@ -39,8 +87,17 @@ const chrome = {
       },
     },
     local: {
-      get: async () => ({}),
-      remove: async () => {},
+      get: async (key) => {
+        if (key == null) return Object.fromEntries([...localStore].map(([k, v]) => [k, clone(v)]));
+        if (Array.isArray(key)) {
+          return Object.fromEntries(key.filter((k) => localStore.has(k)).map((k) => [k, clone(localStore.get(k))]));
+        }
+        return localStore.has(key) ? { [key]: clone(localStore.get(key)) } : {};
+      },
+      set: async (values) => Object.entries(values).forEach(([key, value]) => localStore.set(key, clone(value))),
+      remove: async (key) => {
+        for (const name of Array.isArray(key) ? key : [key]) localStore.delete(name);
+      },
     },
     onChanged: { addListener: (fn) => listeners.storage.push(fn) },
   },
@@ -65,7 +122,7 @@ const context = vm.createContext({
   TextEncoder,
   TextDecoder,
   URL,
-  Date,
+  Date: VirtualDate,
   Set,
   Map,
   Number,
@@ -74,8 +131,8 @@ const context = vm.createContext({
   JSON,
   Array,
   Object,
-  setTimeout: (fn) => { fn(); return 0; },
-  clearTimeout: () => {},
+  setTimeout: fakeSetTimeout,
+  clearTimeout: fakeClearTimeout,
 });
 vm.runInContext(source, context, { filename: backgroundPath });
 
@@ -96,6 +153,8 @@ function sendMessage(msg) {
 }
 
 async function test() {
+  // 启动虚拟时钟泵：后台的定时器（仲裁窗口轮询、节流、补检）才会按预期推进。
+  startClock();
   assert.equal(context.nextEventSequence(undefined), 1);
   assert.equal(context.nextEventSequence(0), 1);
   assert.equal(context.nextEventSequence('7'), 8);
@@ -278,6 +337,108 @@ async function test() {
     syncStore.get('history').some((h) => h.id !== 'winner-claim' && h.eventKey === next.eventKey),
     false,
     'the losing claim must be released so it cannot block the winner'
+  );
+
+  // -------- 跨设备认领仲裁窗口（重复通知的真正根因） --------
+  // storage.sync 是最终一致的：A 写下的认领要经过同步传播才可能被 B 读到。
+  // 旧实现固定等 600ms 只读一次 history，传播稍慢时两台设备都只看到自己的认领，
+  // 于是同一事件各发一条一模一样的通知（用户表现为"换台电脑又收到一遍"）。
+  // 现在窗口内持续轮询：只要在窗口内看到对手就立刻按全序仲裁。
+  const localDeviceId = 'd-self-test';
+  localStore.set('_333_device_id', localDeviceId);
+  const multiEvent = { eventKey: 'v1-arb-window', url: eventBase.url, message: 'window test' };
+  const multiRecord = { name: 'page-1', url: eventBase.url, message: multiEvent.message, kind: 'change' };
+
+  // arbitrateClaim 直接单测：认领被清掉 / 输给更早的对手 / 独占窗口。
+  syncStore.clear();
+  syncStore.set('devices', { [localDeviceId]: vNow, 'd-foreign': vNow });
+  assert.equal(
+    await context.arbitrateClaim(multiEvent, 'claim-vanished'),
+    'skip',
+    'a claim that disappeared from history must not notify'
+  );
+  syncStore.set('history', [
+    { id: 'mine-late', eventKey: multiEvent.eventKey, claimAt: vNow, pending: true },
+    { id: 'rival-early', eventKey: multiEvent.eventKey, claimAt: vNow - 1000, pending: true },
+  ]);
+  assert.equal(
+    await context.arbitrateClaim(multiEvent, 'mine-late'),
+    'skip',
+    'a later claim must lose to the earliest rival'
+  );
+  assert.equal(
+    await context.arbitrateClaim(multiEvent, 'rival-early'),
+    'send',
+    'the earliest claim must win immediately instead of waiting out the window'
+  );
+
+  // 端到端回归：多设备场景下，对手的认领在第 3 次读 history 时才同步过来。
+  // 旧实现（固定 600ms 单次读）会看不到对手并各发一条通知；新实现必须撤回自己。
+  syncStore.clear();
+  syncStore.set('devices', { 'd-foreign': vNow });
+  notificationCount = 0;
+  const lateRival = {
+    id: 'late-rival',
+    url: multiEvent.url,
+    message: multiEvent.message,
+    eventKey: multiEvent.eventKey,
+    claimAt: vNow - 5000,
+    pending: true,
+    read: false
+  };
+  const originalGet = context.chrome.storage.sync.get;
+  let historyReads = 0;
+  context.chrome.storage.sync.get = async (key) => {
+    const data = await originalGet(key);
+    if (key === 'history' && ++historyReads === 3) {
+      // 模拟同步延迟：对手的认领在本机认领之后才传播过来。
+      const current = await originalGet('history');
+      await context.chrome.storage.sync.set({ history: [current[0], lateRival].filter(Boolean) });
+    }
+    return data;
+  };
+  const windowed = await context.notifyOnce(multiEvent, multiRecord, 'notif-window', '333 Watcher');
+  context.chrome.storage.sync.get = originalGet;
+  assert.equal(windowed.ok, true);
+  assert.equal(windowed.skipped, true, 'a rival claim synced in mid-window must suppress the duplicate');
+  assert.equal(notificationCount, 0, 'the late-arriving rival case must not notify at all');
+  assert.equal(
+    syncStore.get('history').some((h) => h.id !== 'late-rival' && h.eventKey === multiEvent.eventKey),
+    false,
+    'the losing claim must be released so the winner on the other device is not blocked'
+  );
+
+  // 单设备快速路径：没有其它设备时窗口必须保持 600ms，不能被无条件拉长。
+  syncStore.clear();
+  syncStore.set('devices', { [localDeviceId]: vNow });
+  notificationCount = 0;
+  const singleEvent = { eventKey: 'v1-arb-single', url: eventBase.url, message: 'single test' };
+  const beforeSingle = vNow;
+  const single = await context.notifyOnce(
+    singleEvent,
+    { name: 'page-1', url: eventBase.url, message: singleEvent.message, kind: 'change' },
+    'notif-single',
+    '333 Watcher'
+  );
+  const singleElapsed = vNow - beforeSingle;
+  assert.equal(single.skipped, undefined, 'a sole device must still notify');
+  assert.equal(notificationCount, 1);
+  assert.ok(singleElapsed < 2000, 'the single-device window must stay short, got ' + singleElapsed + 'ms');
+  assert.ok(singleElapsed >= 600, 'the single-device window must actually wait, got ' + singleElapsed + 'ms');
+
+  // 多设备窗口确实被拉长：只有真的存在别的设备时才等满 5 秒。
+  syncStore.clear();
+  syncStore.set('devices', { [localDeviceId]: vNow, 'd-foreign': vNow });
+  const slowEvent = { eventKey: 'v1-arb-slow', url: eventBase.url, message: 'slow test' };
+  await context.notifyOnce(
+    slowEvent,
+    { name: 'page-1', url: eventBase.url, message: slowEvent.message, kind: 'change' },
+    'notif-slow',
+    '333 Watcher'
+  );
+  assert.ok(
+    vNow - singleElapsed - beforeSingle >= 5000,
+    'a multi-device profile must use the longer arbitration window'
   );
 
   // 并发认领不得丢记录：history 写入已串行化，最后写入的认领必须保留。
@@ -591,10 +752,13 @@ async function test() {
   assert.equal(migrated.invalidReason, 'missing');
   assert.equal(migrated.invalidSince, '2026-09-24T00:00:00.000Z');
 
+  stopClock();
   console.log('background-review tests passed');
 }
 
 test().catch((error) => {
+  // 时钟泵用的是 setImmediate 递归，不停掉的话失败时进程不会退出。
+  stopClock();
   console.error(error);
   process.exitCode = 1;
 });

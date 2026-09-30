@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.25 - claim arbitration and history write lock)
+ * 333 Watcher - Background Service Worker (v0.6.26 - device-aware claim arbitration window)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -26,6 +26,15 @@ const MAX_HTML_BYTES = 2.5 * 1024 * 1024;
 const MAX_JSON_BYTES = 512 * 1024;
 const MAX_TEXT_VALUE_CHARS = 4096;
 const MAX_URL_VALUE_CHARS = 2048;
+// 跨设备通知仲裁窗口。storage.sync 是最终一致的：两台设备几乎同时命中同一次变化时，
+// 各自的认领写入要经过同步传播才能互相看见。窗口太短（原来的固定 600ms）时，
+// 两边都只看到"自己的认领"，于是各发一条一模一样的通知。
+// 检测到存在其他设备时才用长窗口；单设备用户走 600ms 快速路径，不牺牲通知时效。
+const CLAIM_WINDOW_MULTI_MS = 5000;
+const CLAIM_WINDOW_SINGLE_MS = 600;
+const CLAIM_POLL_MS = 250;
+const DEVICE_ID_KEY = '_333_device_id';
+const FOREIGN_DEVICE_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
 // ---------------- 工具 ----------------
 function simpleHash(str) {
@@ -974,6 +983,97 @@ function isActiveClaim(h) {
   return age < 2 * 60 * 1000;
 }
 
+// ---------------- 设备心跳（只用于判断"是否多设备"，不参与去重本身） ----------------
+const DEVICES_KEY = 'devices';
+const DEVICE_HEARTBEAT_MS = 30 * 60 * 1000;  // 同一台设备最多每 30 分钟写一次心跳
+const DEVICE_TTL_MS = 24 * 60 * 60 * 1000;   // 超过 24 小时没心跳视为已卸载
+
+/**
+ * 本机稳定标识。放在 storage.local：storage.sync 会把它同步给所有设备，
+ * 那样每台设备都会读到同一个值，也就分不出"自己"了。
+ */
+async function getDeviceId() {
+  try {
+    const data = await chrome.storage.local.get(DEVICE_ID_KEY);
+    const existing = data && data[DEVICE_ID_KEY];
+    if (existing) return String(existing);
+    const created = 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    await chrome.storage.local.set({ [DEVICE_ID_KEY]: created });
+    return created;
+  } catch (err) {
+    // 拿不到 deviceId 时返回一个进程内恒定值，宁可窗口判断失准也不让通知失败。
+    if (!_fallbackDeviceId) _fallbackDeviceId = 'd-fallback-' + Date.now().toString(36);
+    return _fallbackDeviceId;
+  }
+}
+let _fallbackDeviceId = null;
+
+/**
+ * 刷新本机心跳，并返回"除本机外是否还有别的设备在用这个扩展"。
+ * 这个结果只决定仲裁窗口长短，不参与通知去重；读改写竞争也无害。
+ */
+async function touchDeviceHeartbeat(deviceId) {
+  try {
+    const now = Date.now();
+    const data = await chrome.storage.sync.get(DEVICES_KEY);
+    const raw = (data[DEVICES_KEY] && typeof data[DEVICES_KEY] === 'object') ? data[DEVICES_KEY] : {};
+    const map = {};
+    let dropped = false;
+    for (const id of Object.keys(raw)) {
+      const ts = Number(raw[id]) || 0;
+      if (now - ts < DEVICE_TTL_MS) map[id] = ts;
+      else dropped = true;
+    }
+    const foreign = Object.keys(map).some((id) => id !== deviceId);
+    const last = Number(map[deviceId]) || 0;
+    // 心跳还新鲜且没有过期条目要清理时不必写，省掉绝大多数 sync 写入。
+    if (now - last < DEVICE_HEARTBEAT_MS && !dropped) return foreign;
+    map[deviceId] = now;
+    await chrome.storage.sync.set({ [DEVICES_KEY]: map });
+    return Object.keys(map).some((id) => id !== deviceId);
+  } catch (err) {
+    console.error('[333 Watcher] device heartbeat failed:', err && err.message);
+    // 心跳写不进去（配额/离线）时按多设备处理：窗口拉长只会晚几秒，不会漏发。
+    return true;
+  }
+}
+
+/**
+ * 跨设备认领仲裁。
+ *
+ * storage.sync 是最终一致的：两台设备几乎同时命中同一次变化时，A 的认领要经过
+ * 同步传播才可能被 B 看见。原来固定等 600ms 就判定，传播稍慢时两边都只看到
+ * 自己的认领，于是同一事件各发一条通知（用户表现为"换台电脑又收到一遍"）。
+ * 现在改成在窗口内轮询：看到对手就立刻按全序仲裁决定输赢，没看到就一直等到窗口耗尽。
+ */
+async function arbitrateClaim(event, claimId) {
+  const deviceId = await getDeviceId();
+  const multiDevice = await touchDeviceHeartbeat(deviceId);
+  const windowMs = multiDevice ? CLAIM_WINDOW_MULTI_MS : CLAIM_WINDOW_SINGLE_MS;
+  const deadline = Date.now() + windowMs;
+  for (;;) {
+    const latest = await getHistory();
+    const own = latest.find((h) => h && h.id === claimId);
+    if (!own) {
+      // 自己的认领已被清理或被别人整键覆盖：不能发，否则可能重复。
+      return 'skip';
+    }
+    const rivals = rivalClaimsOf(event, latest, claimId);
+    if (rivals.length) {
+      const winner = pickClaimWinner([own, ...rivals]);
+      if (!winner || winner.id !== claimId) {
+        dbg('[333 Watcher] notification claim lost arbitration:', event.eventKey);
+        return 'skip';
+      }
+      // 赢家无需等满窗口：对手会看到同样的全序结果并撤回自己的认领。
+      return 'send';
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return 'send';
+    await waitMs(Math.min(CLAIM_POLL_MS, remaining));
+  }
+}
+
 function hasSeenEvent(event, history) {
   return (Array.isArray(history) ? history : []).some(h => {
     if (!h) return false;
@@ -1073,21 +1173,10 @@ async function notifyOnce(event, record, notifId, title) {
     if (!claim.claimed) {
       return { ok: true, skipped: true, error: null };
     }
-    // 给另一台设备同步 pending 认领的时间；同一事件的并发发送最多保留一台。
-    await waitMs(600);
-    const latest = await getHistory();
-    const own = latest.find(h => h && h.id === claim.claimId);
-    if (!own) {
+    const verdict = await arbitrateClaim(event, claim.claimId);
+    if (verdict !== 'send') {
+      await releaseNotificationClaim(claim.claimId);
       return { ok: true, skipped: true, error: null };
-    }
-    const rivals = rivalClaimsOf(event, latest, claim.claimId);
-    if (rivals.length) {
-      const winner = pickClaimWinner([own, ...rivals]);
-      if (winner && winner.id !== claim.claimId) {
-        dbg('[333 Watcher] notification claim lost arbitration:', event.eventKey);
-        await releaseNotificationClaim(claim.claimId);
-        return { ok: true, skipped: true, error: null };
-      }
     }
     const result = await sendNotification(notifId, title, record.message);
     await completeNotificationClaim(claim.claimId, result.ok);
@@ -1494,7 +1583,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.25)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.26)');
 
 
 
