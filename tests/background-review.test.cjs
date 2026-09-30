@@ -1119,7 +1119,59 @@ async function test() {
   assert.equal(ids().includes('imp-1'), true, 'import must keep the imported monitor');
   assert.equal(ids().includes('p1'), true, 'import must not drop existing monitors');
 
+  // ---------------- 导入：id 撞车 ----------------
+  // id 同时是 alarm 名（ALARM_PREFIX+id）、通知 id（notif-<id>）和
+  // 检查锁（_checkLock）的键。旧实现用导入项整体替换同 key 的旧项，
+  // 于是备份文件里的 id 会顶掉本机已存在的 id：
+  //   1) 同一份备份在两台机器上导入时，id 极可能和本机独立创建的监控撞车；
+  //   2) 撞车后两条监控共用一个 alarm —— syncAlarms 的 wanted 集合里只有
+  //      一个名字，其中一条**再也不会被检查**；
+  //   3) findIndex(m.id === ...) 永远只命中第一条，基线会写到错的监控上。
+  // 导入必须保留本机已存在的 id（身份属于本机），并对真正的撞车重新发号。
+  const beforeById = new Map(syncStore.get('monitors').map((m) => [m.id, m.url]));
+  const beforeIds = [...beforeById.keys()];
+  const collided = await sendMessage({
+    type: 'mutate-monitors',
+    op: 'import-by-key',
+    monitors: [
+      // 同 key（同一 url/selector），但备份里的 id 与本机不同。
+      { id: 'from-backup-A', url: beforeById.get(beforeIds[0]), type: 'page' },
+      // 全新 key，但 id 恰好等于本机另一条监控的 id。
+      { id: beforeIds[0], url: 'https://example.test/brand-new', type: 'page' },
+    ],
+  });
+  assert.equal(collided.added, 1, 'only the genuinely new monitor counts as added');
+  const afterIds = ids();
+  assert.equal(
+    new Set(afterIds).size,
+    afterIds.length,
+    'every monitor id must stay unique after an import, got: ' + afterIds.join(', ')
+  );
+  assert.equal(
+    afterIds.includes('from-backup-A'),
+    false,
+    'merging into an existing monitor must keep the local id, not adopt the backup id'
+  );
+  assert.equal(
+    afterIds.includes(beforeIds[0]),
+    true,
+    'the pre-existing monitor must keep its id'
+  );
+  // 每个 id 都要能解析回唯一一条监控（alarm 就是靠这个 id 找到目标的）。
+  const byId = new Map();
+  for (const m of syncStore.get('monitors')) {
+    assert.equal(byId.has(m.id), false, 'id ' + m.id + ' resolves to more than one monitor');
+    byId.set(m.id, m);
+  }
+  // 原本持有该 id 的那条监控必须还是它自己：撞车时只应给**新来的**那条改号。
+  assert.equal(
+    byId.get(beforeIds[0]).url,
+    beforeById.get(beforeIds[0]),
+    'the id owner must not be silently reassigned to a different url'
+  );
+
   // 页面侧新增去重读的是旧快照：并发下可能撞上同 key，background 必须兜底不建重复项。
+  const countBeforeUpsert = syncStore.get('monitors').length;
   const dupeBackstop = plain(await sendMessage({
     type: 'mutate-monitors',
     op: 'upsert',
@@ -1127,7 +1179,11 @@ async function test() {
   }));
   assert.equal(dupeBackstop.mode, 'updated', 'an upsert colliding on monitorKey must update, not duplicate');
   assert.equal(dupeBackstop.id, 'p1', 'the colliding upsert must keep the existing monitor id');
-  assert.equal(syncStore.get('monitors').length, 5, 'a colliding upsert must not add a row');
+  assert.equal(
+    syncStore.get('monitors').length,
+    countBeforeUpsert,
+    'a colliding upsert must not add a row'
+  );
   assert.equal(
     syncStore.get('monitors').find((m) => m.id === 'p1').name,
     'raced',
@@ -1136,7 +1192,11 @@ async function test() {
 
   const bad = await sendMessage({ type: 'mutate-monitors', op: 'nope' });
   assert.equal(bad.ok, false, 'an unknown op must be rejected');
-  assert.equal(syncStore.get('monitors').length, 5, 'an unknown op must not write');
+  assert.equal(
+    syncStore.get('monitors').length,
+    countBeforeUpsert,
+    'an unknown op must not write'
+  );
 
   syncStore.clear();
   syncStore.set('monitors', [{

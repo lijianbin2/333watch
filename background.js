@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.37 - 链接实体解码修复)
+ * 333 Watcher - Background Service Worker (v0.6.38 - 导入 id 撞车修复)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -79,6 +79,12 @@ function nextEventSequence(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0) return 1;
   return Math.min(2147483647, Math.floor(n) + 1);
+}
+
+// 监控 id 唯一化入口。id 同时充当 alarm 名、通知 id 和检查锁的键，
+// 所以必须集中生成，别处不要自己拼 Date.now()+random。
+function mintMonitorId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
 function waitMs(ms) {
@@ -372,7 +378,7 @@ async function savePickedMonitor(pick, attribute) {
     }
 
     const monitor = {
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      id: mintMonitorId(),
       name: name,
       url: url,
       interval: DEFAULT_INTERVAL,
@@ -425,8 +431,13 @@ async function migrateDataUnlocked() {
       const url = normalizeUrl(w.url);
       if (!url) continue;
       if (!monitors.some((m) => normalizeUrl(m.url) === url)) {
+        // 旧 watchers 里的 id 可能和现有 monitors 撞车（同一份旧数据在多台
+        // 机器上都存在时尤其容易）。撞车会让两条监控共用一个 alarm，
+        // 其中一条再也不会被检查，基线还会写到错的记录上。
+        const wantedId = w.id ? String(w.id) : '';
+        const idTaken = wantedId && monitors.some((m) => String(m.id || '') === wantedId);
         monitors.push({
-          id: w.id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)),
+          id: idTaken ? mintMonitorId() : (wantedId || mintMonitorId()),
           name: w.name || w.url,
           url: url,
           interval: clampInterval(w.interval, DEFAULT_INTERVAL),
@@ -1540,7 +1551,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const legacyUrl = TEST_URL_PREFIX + 'demo';
       const cur = await getTestValue(attr);
       const monitor = {
-        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        id: mintMonitorId(),
         name: isHref ? '🔍 测试监控-链接' : '📄 测试监控-文字',
         url: targetUrl,
         interval: 1,
@@ -1657,10 +1668,36 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             for (const m of (Array.isArray(msg.monitors) ? msg.monitors : [])) {
               if (!m) continue;
               const key = monitorKey(m);
-              if (!map.has(key)) added++;
+              const prev = map.get(key);
+              if (prev) {
+                // 身份属于本机：id 是 alarm 名 / 通知 id / 检查锁的键，
+                // 换成备份文件里的 id 会让在途的认领和已建的 alarm 对不上。
+                map.set(key, { ...m, id: prev.id });
+                continue;
+              }
+              added++;
               map.set(key, m);
             }
-            list.splice(0, list.length, ...map.values());
+            // 备份文件里的 id 未必和本机不冲突：同一份备份可以在多台机器上
+            // 与各自独立创建的监控撞 id。id 重复会让两条监控共用一个 alarm
+            // （其中一条再也不会被检查）、共用同一个通知 id，且
+            // findIndex(m.id === ...) 永远只命中第一条 —— 基线写到错的监控上。
+            // 顺带修掉此前已被写坏的状态。
+            const usedIds = new Set();
+            const deduped = [];
+            for (const x of map.values()) {
+              const id = String(x.id || '');
+              if (id && usedIds.has(id)) {
+                const fresh = mintMonitorId();
+                dbg('[333 Watcher] import: duplicate monitor id, reassigned', id, '->', fresh);
+                deduped.push({ ...x, id: fresh });
+                usedIds.add(fresh);
+                continue;
+              }
+              if (id) usedIds.add(id);
+              deduped.push(x);
+            }
+            list.splice(0, list.length, ...deduped);
             return { added: added, total: map.size };
           }
           return false;
@@ -1771,7 +1808,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.37)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.38)');
 
 
 

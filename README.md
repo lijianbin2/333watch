@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.37**
+当前版本：**v0.6.38**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -246,7 +246,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.37"
+$version = "0.6.38"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -267,6 +267,18 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.38
+
+- 修复**导入/迁移监控时 monitor id 撞车**，导致「刚换电脑后又收到一次相同提醒」以及监控静默失效。
+  - 根因：`import-by-key` 导入时用导入项**整体替换**同 `monitorKey` 的旧项，但导入项带的是**备份文件里的 id**，不是本机旧项的 id。
+  - 同一份备份在两台机器导入、或备份 id 与本机独立创建的监控撞车时，两条监控会**共用同一个 alarm**（`ALARM_PREFIX+id`）→ 其中一条**再也不会被检查**（静默死亡，只在导入瞬间响一次）。
+  - 同时 `findIndex(m.id===...)` 永远只命中第一条 → 基线写到错的监控；通知 id（`notif-<id>`）与检查锁 `_checkLock` 也一并撞车。
+  - 修复：
+    - 同 key 合并时**保留本机旧 id**（身份属于本机，导入只更新内容）。
+    - 合并后对全表做 id 去重，撞车的新项用统一入口 `mintMonitorId()` 重新发号，顺带修复此前已写坏的状态。
+    - `savePickedMonitor` 新建监控、`test-create`、旧 watchers `migrateData` 统一走 `mintMonitorId()`。
+- 测试：新增导入 id 撞车回归（合并保本地 id、撞车重新发号、每个 id 唯一解析、原 id 所有者 url 不变）。已用 `git stash` 验证修复前必然失败。
 
 ### v0.6.37
 
