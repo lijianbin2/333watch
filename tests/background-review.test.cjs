@@ -1190,6 +1190,61 @@ async function test() {
     'a colliding upsert must apply the new definition'
   );
 
+  // id 撞车但 monitorKey 不同：绝不能当成"更新"把那条毫不相关的监控整条覆盖掉。
+  // 页面侧 addMonitor 自己拼 id，撞上了就只能重新发号 + 按新增处理。
+  const countBeforeIdClash = syncStore.get('monitors').length;
+  // 动态挑一条当前真实存在的监控来撞 id：前面那几轮导入/去重已经改过 id 列表，
+  // 写死 'p2' 会因为那条早已不存在而测不到真正的撞车分支。
+  const clashVictim = syncStore.get('monitors')[0];
+  const victimId = clashVictim.id;
+  const victimUrl = clashVictim.url;
+  const clash = plain(await sendMessage({
+    type: 'mutate-monitors',
+    op: 'upsert',
+    monitor: { id: victimId, url: 'https://example.test/totally-different', type: 'page', name: 'clashing' },
+  }));
+  assert.equal(clash.mode, 'added', 'an id clash on a different monitor must be added under a fresh id');
+  assert.notEqual(clash.id, victimId, 'the clashing monitor must be given a fresh id');
+  assert.equal(
+    syncStore.get('monitors').length,
+    countBeforeIdClash + 1,
+    'an id clash must add the new monitor, not replace the existing one'
+  );
+  assert.equal(
+    syncStore.get('monitors').find((m) => m.id === victimId).url,
+    victimUrl,
+    'the monitor that owned the id must survive the id clash with its url intact'
+  );
+  // 同样的 key 再次提交时，仍要正常走更新分支（不能被上一条改动带偏）。
+  const clashUpdate = plain(await sendMessage({
+    type: 'mutate-monitors',
+    op: 'upsert',
+    monitor: {
+      id: clash.id,
+      url: 'https://example.test/totally-different',
+      type: 'page',
+      name: 'clashing renamed',
+    },
+  }));
+  assert.equal(clashUpdate.mode, 'updated', 're-submitting the reassigned monitor must update it in place');
+  assert.equal(clashUpdate.id, clash.id, 'the reassigned id must be stable across updates');
+  assert.equal(
+    syncStore.get('monitors').find((m) => m.id === clash.id).name,
+    'clashing renamed',
+    'the reassigned monitor must accept updates'
+  );
+  // 回到本节起点状态，后续断言继续用 p1/p2/p3。
+  await sendMessage({
+    type: 'mutate-monitors',
+    op: 'remove',
+    id: clash.id,
+  });
+  assert.equal(
+    syncStore.get('monitors').length,
+    countBeforeIdClash,
+    'cleanup must restore the row count'
+  );
+
   const bad = await sendMessage({ type: 'mutate-monitors', op: 'nope' });
   assert.equal(bad.ok, false, 'an unknown op must be rejected');
   assert.equal(
@@ -1270,6 +1325,48 @@ async function test() {
     keptTargets,
     ['https://legacy.test/mac.zip|', 'https://legacy.test/win.zip|', '|Windows', '|macOS'],
     'migration must keep each distinct legacy link monitor'
+  );
+
+  // 迁移必须顺手修好重复/空 id：导入去重只覆盖"导入那一刻"，而重复 id 早就
+  // 被旧版本写进存储了。修不好，syncAlarms 就给它们建同一个 alarm，
+  // 其中一条再也不会被检查（用户表现为"某条监控突然不响了"）。
+  syncStore.clear();
+  syncStore.set('monitors', [
+    { id: 'dup-a', url: 'https://legacy.test/one', type: 'page', updatedAt: 1 },
+    // 与上一条同 id：早期按 URL 去重把两条不同监控并成一条时留下的坏状态。
+    { id: 'dup-a', url: 'https://legacy.test/two', type: 'page', updatedAt: 2 },
+    { id: '', url: 'https://legacy.test/three', type: 'page', updatedAt: 3 },
+    { id: 'dup-a', url: 'https://legacy.test/four', type: 'page', updatedAt: 4 },
+  ]);
+  await context.migrateData();
+  const healed = syncStore.get('monitors');
+  assert.equal(healed.length, 4, 'migration must keep all four distinct monitors');
+  const healedIds = Array.from(healed, (m) => m.id);
+  assert.equal(
+    new Set(healedIds).size,
+    healedIds.length,
+    'migration must leave every monitor id unique, got: ' + healedIds.join(', ')
+  );
+  assert.equal(
+    healedIds.includes(''),
+    false,
+    'migration must replace an empty monitor id'
+  );
+  assert.equal(
+    healedIds.filter((id) => id === 'dup-a').length,
+    1,
+    'exactly one monitor may keep the duplicated id'
+  );
+  // 每个 id 都要能解析回唯一一条监控 —— syncAlarms 正是靠这个 id 找目标。
+  const healedById = new Map();
+  for (const m of healed) {
+    assert.equal(healedById.has(m.id), false, 'id ' + m.id + ' resolves to more than one monitor after migration');
+    healedById.set(m.id, m);
+  }
+  assert.deepEqual(
+    Array.from(healed, (m) => m.url).sort(),
+    ['https://legacy.test/four', 'https://legacy.test/one', 'https://legacy.test/three', 'https://legacy.test/two'],
+    'reassigning ids must not drop or rename any monitor'
   );
 
   stopClock();

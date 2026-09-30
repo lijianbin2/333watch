@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.38 - 导入 id 撞车修复)
+ * 333 Watcher - Background Service Worker (v0.6.39 - monitor id 全入口唯一化)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -85,6 +85,36 @@ function nextEventSequence(value) {
 // 所以必须集中生成，别处不要自己拼 Date.now()+random。
 function mintMonitorId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+/**
+ * 保证整张监控表的 id 非空且互不相同，原地返回同一批对象。
+ *
+ * id 同时充当 alarm 名（ALARM_PREFIX+id）、通知 id 和检查锁的键，所以一旦重复：
+ *   - 两条监控共用一个 alarm，syncAlarms 只建得出一个 → 其中一条再也不会被检查；
+ *   - 通知 id 相同 → 后一条直接顶掉前一条，用户看到"少了一条提醒"；
+ *   - findIndex(m.id === ...) 永远只命中第一条 → 基线写到错的监控上。
+ *
+ * 三个入口（导入合并 / 启动迁移 / 新增监控）都要过这道闸，缺一个就留下缺口：
+ * 只有导入去重的话，旧版本已经写坏的表永远不会被修复。
+ */
+function ensureUniqueMonitorIds(list) {
+  const used = new Set();
+  const repaired = [];
+  for (const m of list) {
+    if (!m || typeof m !== 'object') { repaired.push(m); continue; }
+    const id = String(m.id || '');
+    if (id && !used.has(id)) {
+      used.add(id);
+      repaired.push(m);
+      continue;
+    }
+    const fresh = mintMonitorId();
+    dbg('[333 Watcher] monitor id 空/重复，重新发号:', id || '(空)', '->', fresh);
+    used.add(fresh);
+    repaired.push({ ...m, id: fresh });
+  }
+  return repaired;
 }
 
 function waitMs(ms) {
@@ -499,7 +529,13 @@ async function migrateDataUnlocked() {
     const timeOf = (x) => Number(x.updatedAt) || new Date(x.createdAt).getTime() || 0;
     if (!prev || timeOf(m) > timeOf(prev)) keyLatest.set(key, m);
   }
-  const deduped = normalized.filter((m) => !!normalizeUrl(m.url) && keyLatest.get(monitorKey(m)) === m);
+  // id 也要在这里兜一道：导入去重只覆盖"导入那一刻"，而重复 id 可能早就被
+  // 旧版本写进存储了（例如更早的 merge 按 URL 去重，把两条不同监控并成一条）。
+  // 迁移在每次启动时都跑，把空/重复 id 修好，才能让 syncAlarms 真正为每条
+  // 监控建出独立的 alarm，而不是让它们挤在同一个名字后面互相顶掉。
+  const deduped = ensureUniqueMonitorIds(
+    normalized.filter((m) => !!normalizeUrl(m.url) && keyLatest.get(monitorKey(m)) === m)
+  );
 
   if (migrated || JSON.stringify(deduped) !== JSON.stringify(monitors)) {
     await saveMonitors(deduped);
@@ -1637,8 +1673,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             if (!m || !m.id) return false;
             const idx = list.findIndex((x) => x.id === m.id);
             if (idx !== -1) {
-              list[idx] = m;
-              return { id: m.id, mode: 'updated' };
+              // id 是页面侧生成的，撞上另一条监控时不能直接覆盖 —— 那会把
+              // 一条毫不相关的监控整条抹掉（连带它的 alarm 和基线）。
+              // 目标不同就说明是撞车，重新发号并按新增处理。
+              if (monitorKey(list[idx]) === monitorKey(m)) {
+                list[idx] = m;
+                return { id: m.id, mode: 'updated' };
+              }
+              const fresh = mintMonitorId();
+              dbg('[333 Watcher] upsert id 撞车，重新发号:', m.id, '->', fresh);
+              list.push({ ...m, id: fresh });
+              return { id: fresh, mode: 'added' };
             }
             // 页面侧新增去重读的是旧快照，并发下仍可能撞上同 key 的既有监控：
             // 这里按 monitorKey 再兜一次底，命中就更新那条，而不是建出重复项。
@@ -1683,20 +1728,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             // （其中一条再也不会被检查）、共用同一个通知 id，且
             // findIndex(m.id === ...) 永远只命中第一条 —— 基线写到错的监控上。
             // 顺带修掉此前已被写坏的状态。
-            const usedIds = new Set();
-            const deduped = [];
-            for (const x of map.values()) {
-              const id = String(x.id || '');
-              if (id && usedIds.has(id)) {
-                const fresh = mintMonitorId();
-                dbg('[333 Watcher] import: duplicate monitor id, reassigned', id, '->', fresh);
-                deduped.push({ ...x, id: fresh });
-                usedIds.add(fresh);
-                continue;
-              }
-              if (id) usedIds.add(id);
-              deduped.push(x);
-            }
+            const deduped = ensureUniqueMonitorIds([...map.values()]);
             list.splice(0, list.length, ...deduped);
             return { added: added, total: map.size };
           }
@@ -1808,7 +1840,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.38)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.39)');
 
 
 
