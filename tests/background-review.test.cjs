@@ -343,16 +343,25 @@ async function test() {
   assert.equal(notificationCount, 1, 'an active cross-device claim must suppress a duplicate');
 
   // 崩溃遗留的过期认领不应永久阻塞通知。
+  // 必须用一个从未投递过的新事件：first 前面已经真的发出过一次，
+  // 它的已投递标记还在（deliveredEvents），换事件才能真正测到
+  // "过期且未投递的认领不阻塞"这一点，而不是被标记先一步拦掉。
+  const expiredEvent = { eventKey: 'v1-expired-claim', url: eventBase.url, message: 'expired claim test' };
   syncStore.set('history', [{
     id: 'stale-claim',
     url: eventBase.url,
-    message: first.message,
-    eventKey: first.eventKey,
+    message: expiredEvent.message,
+    eventKey: expiredEvent.eventKey,
     claimAt: Date.now() - 10 * 60 * 1000,
     pending: true,
     read: false
   }]);
-  const staleClaimNotify = await context.notifyOnce(first, notifyRecord, 'notif-page-1', '333 Watcher');
+  const staleClaimNotify = await context.notifyOnce(
+    expiredEvent,
+    { ...notifyRecord, message: expiredEvent.message },
+    'notif-page-1',
+    '333 Watcher'
+  );
   assert.equal(staleClaimNotify.ok, true);
   assert.notEqual(staleClaimNotify.skipped, true, 'an expired claim must not block the notification');
   assert.equal(notificationCount, 2);
@@ -507,6 +516,86 @@ async function test() {
     await context.arbitrateClaim(multiEvent, 'mine-expired-race'),
     'send',
     'an expired undelivered rival must not block the notification'
+  );
+
+  // 回归：赢家的"已投递"标记被输家的撤回写覆盖掉时，不得再发第二条。
+  //
+  // withHistoryLock 只是进程内互斥，跨设备依然是整键读-改-写、后写者覆盖。
+  // 赢家投完通知调 completeNotificationClaim 写入 delivered:true，
+  // 输家同时在 releaseNotificationClaim 里撤掉自己的认领 —— 两次写同一个
+  // history 键，谁后落地不受控。输家的旧快照里赢家的记录还是 pending:true，
+  // 于是 delivered:true 被覆盖回"认领中"。
+  // 2 分钟后那条记录过期：既不算活跃竞争者（isActiveClaim 为假），
+  // 也不算已投递（delivered 标志已被抹掉），于是同一次变化被当成
+  // "从未提醒过"，再发一条一模一样的通知 —— 正是用户遇到的重复提醒。
+  // 独立的 deliveredEvents 键只有赢家会写，输家的撤回碰不到它，
+  // 因此标记不会被回滚。
+  syncStore.clear();
+  syncStore.set('devices', { [localDeviceId]: vNow, 'd-foreign': vNow });
+  const clobberEvent = { eventKey: 'v1-clobbered', url: eventBase.url, message: 'clobber test' };
+  syncStore.set('deliveredEvents', { 'v1-clobbered': vNow });
+  syncStore.set('history', [{
+    id: 'clobbered-claim',
+    eventKey: 'v1-clobbered',
+    claimAt: vNow - 10 * 60 * 1000,
+    pending: true
+  }]);
+  notificationCount = 0;
+  const clobbered = await context.notifyOnce(
+    clobberEvent,
+    { name: 'page-1', url: eventBase.url, message: clobberEvent.message, kind: 'change' },
+    'notif-clobber',
+    '333 Watcher'
+  );
+  assert.equal(
+    clobbered.skipped,
+    true,
+    'a durable delivered marker must suppress the duplicate even after the history record was clobbered'
+  );
+  assert.equal(notificationCount, 0, 'a clobbered history record must never cause a second notification');
+
+  // 正向路径：投递成功必须留下标记，投递失败必须不留下。
+  // 失败时不写标记是关键 —— 否则一次偶发的通知失败会把这条提醒永久吞掉，
+  // 用户再也收不到本该收到的下一次提醒。
+  syncStore.clear();
+  syncStore.set('devices', { [localDeviceId]: vNow });
+  notificationCount = 0;
+  const markedEvent = { eventKey: 'v1-marked', url: eventBase.url, message: 'marked test' };
+  await context.notifyOnce(
+    markedEvent,
+    { name: 'page-1', url: eventBase.url, message: markedEvent.message, kind: 'change' },
+    'notif-marked',
+    '333 Watcher'
+  );
+  assert.equal(notificationCount, 1);
+  assert.equal(
+    await context.isEventDelivered('v1-marked'),
+    true,
+    'a successful send must record a durable delivered marker'
+  );
+
+  // 投递失败：认领被删除、且不能留下标记，下一轮检查必须还能重试。
+  syncStore.clear();
+  const realNotificationsCreate = chrome.notifications.create;
+  chrome.notifications.create = (_id, _options, callback) => { callback('notif-err'); };
+  // sendNotification 是靠 chrome.runtime.lastError 判定失败的，
+  // 回调参数本身不算错误。
+  chrome.runtime.lastError = { message: 'notification failed' };
+  notificationCount = 0;
+  const failedEvent = { eventKey: 'v1-failed', url: eventBase.url, message: 'failed test' };
+  const failedResult = await context.notifyOnce(
+    failedEvent,
+    { name: 'page-1', url: eventBase.url, message: failedEvent.message, kind: 'change' },
+    'notif-failed',
+    '333 Watcher'
+  );
+  chrome.notifications.create = realNotificationsCreate;
+  chrome.runtime.lastError = null;
+  assert.equal(failedResult.ok, false, 'the failing send must report failure');
+  assert.equal(
+    await context.isEventDelivered('v1-failed'),
+    false,
+    'a failed send must not record a delivered marker, or the reminder would be lost forever'
   );
 
   // 单设备快速路径：没有其它设备时窗口必须保持 600ms，不能被无条件拉长。

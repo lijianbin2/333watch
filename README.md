@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.34**
+当前版本：**v0.6.35**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -246,7 +246,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.34"
+$version = "0.6.35"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -267,6 +267,22 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.35
+
+- 修复跨设备重复通知的**二阶竞态**（v0.6.31 的补丁在一种时序下仍会被绕过）。
+  - `withHistoryLock` 只是**进程内**互斥锁。跨设备时 `storage.sync` 上整个 `history` 键仍是读-改-写，**后写者覆盖先写者**，而赢家和输家几乎同时在写同一个键：
+    - 赢家投完通知后调 `completeNotificationClaim`，把自己的认领置为 `pending:false, delivered:true`；
+    - 输家在 `releaseNotificationClaim` 里撤掉自己的认领。
+  - 两次写谁后落地不受控。输家的旧快照里赢家的记录还是 `pending:true`，于是 **`delivered:true` 被覆盖回"认领中"**。
+  - 2 分钟后那条记录过期：`isActiveClaim` 为假 → 不算活跃竞争者；`delivered` 已被抹掉 → 不算已投递。仲裁于是判定"无人竞争过"，把**同一次变化当成从未提醒过**再发一条 —— 正是"同一条提醒收到两遍"。
+- 修复方式：新增独立的 `deliveredEvents` 存储键记录已投递的 `eventKey`，**只有仲裁赢家会写它**，输家的撤回碰不到，标记因此不会被回滚。
+  - 仲裁窗口内的每次轮询都会重读该键：对手的标记和对手的认领一样要几百毫秒才能同步过来，靠窗口内轮询才等得到（不重读就只能靠"认领中"形态，正好会漏掉已投递形态）。
+  - 键按条数和 7 天保留期双重裁剪，避免无界增长撑爆 `storage.sync` 配额。
+  - 发送失败时**不写**标记，否则一次偶发的通知失败会把这条提醒永久吞掉。
+  - `markEventDelivered` 必须在 `withHistoryLock` **锁外**调用：它自己也要拿这把锁，而 `withHistoryLock` 是 promise 链，锁内再等一次锁会直接死锁。
+- 测试：新增回归断言覆盖三条路径 —— 标记存在时不得二次通知（已用 `git stash` 验证修复前必然失败）、成功发送必须留下标记、失败发送必须不留下标记。
+- 顺带修正一处**测试自身的状态泄漏**："过期认领不阻塞通知"那条断言原先复用了前面已真实投递过的事件键，在标记生效后会被先一步拦掉；已改用全新事件键，使其真正测到"过期且未投递的认领不阻塞"这一点。
 
 ### v0.6.34
 

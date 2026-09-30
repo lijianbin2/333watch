@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.34 - 旧版链接监控去重修复)
+ * 333 Watcher - Background Service Worker (v0.6.35 - 跨设备重复通知竞态修复)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -1114,7 +1114,7 @@ async function arbitrateClaim(event, claimId) {
     // 会得出"无人竞争"的错误结论，等满窗口后再发一条一模一样的通知。
     // 认领成功与否只在 claimNotificationEvent 里查过一次 hasSeenEvent，
     // 仲裁阶段不复查，因此这里必须单独判定已投递。
-    if (deliveredRivalClaimsOf(event, latest, claimId).length) {
+    if (deliveredRivalClaimsOf(event, latest, claimId).length || await isEventDelivered(event.eventKey)) {
       dbg('[333 Watcher] notification already delivered on another device:', event.eventKey);
       return 'skip';
     }
@@ -1139,6 +1139,11 @@ function hasSeenEvent(event, history) {
 
 async function claimNotificationEvent(event, record) {
   return withHistoryLock(async () => {
+    // 独立标记优先于 history 快照：history 记录上的 delivered 字段可能被另一台
+    // 设备的撤回写覆盖掉，标记本身才是"已提醒过"的权威依据。
+    if (await isEventDelivered(event && event.eventKey)) {
+      return { claimed: false, reason: 'already-delivered' };
+    }
     const history = await getHistory();
     if (hasSeenEvent(event, history)) {
       return { claimed: false, reason: 'already-recorded' };
@@ -1195,9 +1200,65 @@ function deliveredRivalClaimsOf(event, history, claimId) {
   ));
 }
 
-async function completeNotificationClaim(claimId, delivered) {
+async function getDeliveredEvents() {
+  try {
+    const data = await chrome.storage.sync.get(DELIVERED_KEY);
+    const raw = data && data[DELIVERED_KEY];
+    return (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+  } catch (err) {
+    return {};
+  }
+}
+
+/**
+ * 这个 eventKey 是否已经被某台设备成功投递过。
+ *
+ * 仲裁阶段必须每次轮询都重读：storage.sync 传播要几百毫秒，
+ * 对手的标记很可能在本机窗口过半之后才同步过来（和对手的认领一样，
+ * 窗口内轮询才等得到）。
+ */
+async function isEventDelivered(eventKey) {
+  if (!eventKey) return false;
+  const map = await getDeliveredEvents();
+  return Object.prototype.hasOwnProperty.call(map, eventKey);
+}
+
+/**
+ * 记下"这个 eventKey 已经投递成功"，只有仲裁赢家会调用。
+ *
+ * 为什么不直接把 delivered 写在 history 记录上就够了：
+ * withHistoryLock 只是进程内互斥，跨设备依然是整键读-改-写、后写者覆盖。
+ * 赢家投完通知写 delivered:true，输家几乎同时在 releaseNotificationClaim 里
+ * 撤掉自己的认领，两次写的是同一个 history 键，谁后落地不受控。输家的旧快照
+ * 里赢家的记录还是 pending:true，于是 delivered:true 被覆盖回"认领中"。
+ * 2 分钟后那条记录过期：既不算活跃竞争者（isActiveClaim 为假），也不算已投递
+ * （delivered 标志已被抹掉），同一次变化就被当成"从未提醒过"再发一遍。
+ *
+ * 独立键只有赢家写，输家的撤回碰不到它，标记因此不会被回滚。
+ * 写前重读并合并，是为了缩小两台设备"同时完成不同事件"时互相覆盖的窗口。
+ */
+async function markEventDelivered(eventKey) {
+  if (!eventKey) return;
+  await withHistoryLock(async () => {
+    try {
+      const map = { ...(await getDeliveredEvents()) };
+      map[eventKey] = Date.now();
+      const cutoff = Date.now() - HISTORY_READ_RETENTION_MS;
+      const kept = Object.entries(map)
+        .filter(([, at]) => Number(at) >= cutoff)
+        .sort((a, b) => Number(b[1]) - Number(a[1]))
+        .slice(0, DELIVERED_LIMIT);
+      await chrome.storage.sync.set({ [DELIVERED_KEY]: Object.fromEntries(kept) });
+    } catch (err) {
+      // 标记只是跨设备去重的额外保险，写不进去绝不能让通知失败。
+      console.error('[333 Watcher] delivered marker write failed:', err && err.message);
+    }
+  });
+}
+
+async function completeNotificationClaim(claimId, delivered, eventKey) {
   if (!claimId) return;
-  return withHistoryLock(async () => {
+  await withHistoryLock(async () => {
     const history = await getHistory();
     const next = history.map(h => {
       if (!h || h.id !== claimId) return h;
@@ -1213,6 +1274,10 @@ async function completeNotificationClaim(claimId, delivered) {
       await saveHistory(next);
     }
   });
+  // 必须在锁外调用：markEventDelivered 自己也要拿这把锁，
+  // 在锁内再等一次锁会死锁（withHistoryLock 是 promise 链，队列排在调用者后面）。
+  // 发送失败时只删认领、不写标记，让下一次检查还能重试这条提醒。
+  if (delivered) await markEventDelivered(eventKey);
 }
 
 // 输掉仲裁时撤回自己的认领，避免赢家被这条残留 pending 挡住。
@@ -1242,7 +1307,7 @@ async function notifyOnce(event, record, notifId, title) {
       return { ok: true, skipped: true, error: null };
     }
     const result = await sendNotification(notifId, title, record.message);
-    await completeNotificationClaim(claim.claimId, result.ok);
+    await completeNotificationClaim(claim.claimId, result.ok, event.eventKey);
     return result;
   } finally {
     _pendingNotificationKeys.delete(event.eventKey);
@@ -1671,7 +1736,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.34)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.35)');
 
 
 
@@ -1680,6 +1745,10 @@ const HISTORY_KEY = 'history';
 const HISTORY_LIMIT = 50; // storage.sync 容量有限，只保留最近 50 条
 const HISTORY_MAX_BYTES = 7000; // storage.sync 单 key 上限 8KB，留出余量
 const HISTORY_READ_RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 已读通知保留 7 天后自动清理
+// 已投递事件的独立标记，单独占一个 storage.sync 键。
+// 见下方 markEventDelivered 的说明：不能只依赖 history 记录上的 delivered 字段。
+const DELIVERED_KEY = 'deliveredEvents';
+const DELIVERED_LIMIT = 60;
 
 function utf8Bytes(str) {
   return new TextEncoder().encode(str).length;
