@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.29**
+当前版本：**v0.6.30**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -228,6 +228,7 @@ Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 ├─ offscreen.js
 ├─ icons/
 ├─ tests/
+│  ├─ add-monitor-review.test.cjs
 │  └─ background-review.test.cjs
 ├─ PRIVACY.md
 └─ README.md
@@ -236,11 +237,7 @@ Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 ### 本地检查
 
 ```powershell
-node --check background.js
-node --check add-monitor.js
-node --check picker.js
-node --check offscreen.js
-node tests/background-review.test.cjs
+powershell -ExecutionPolicy Bypass -File scripts/test.ps1
 git diff --check
 ```
 
@@ -249,7 +246,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.29"
+$version = "0.6.30"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -270,6 +267,13 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.30
+
+- 修复导入设置会静默丢弃旧版链接监控：`normalizeImportedMonitor` 要求"指定内容"类监控必须有 `selector`，否则整条判为无效丢弃。但旧版链接监控（`type` 为 `link`/`download`，或已迁移成 `element` 但 `selector` 为空、只有 `targetHref`/`targetText`）本来就没有 selector——`background` 的 `migrateData` 和 `checkMonitor` 都专门为这种记录保留了 `checkLink` 回退检测路径。结果是：把旧版导出的备份导入新版，这类监控全部被跳过，只在状态栏显示"跳过无效 N 条"，用户不会收到任何逐条提示。现在按同样规则判断——没有 selector 但有 `targetHref`/`targetText` 的记录照常导入，并保留这两个回退字段；
+- 导入时保留 `eventSeq`：它参与跨设备去重 `eventKey` 的计算，一律重置为 0 会让导入后的监控与 `history` 里的旧事件撞上同一个 key，导致本该发送的提醒被误吞；
+- 新增 `tests/add-monitor-review.test.cjs`：用最小 DOM 桩把弹窗脚本整个加载起来，直接对其纯函数做断言（链接监控不丢、`targetHref`/`targetText` 保留、`eventSeq` 保留、`interval` 夹紧、无效记录仍被拒）。已验证"旧版链接监控被丢弃"这一断言在修复前失败；
+- 新增 `scripts/test.ps1`：一次跑完四个源文件的语法检查与全部测试套件。
 
 ### v0.6.29
 

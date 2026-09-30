@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.29 - per-monitor error isolation on catch-up)
+ * 333 Watcher - Background Service Worker (v0.6.30 - per-monitor error isolation on catch-up)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -1620,7 +1620,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.29)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.30)');
 
 
 

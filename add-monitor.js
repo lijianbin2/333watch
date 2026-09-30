@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.29 - 启动补检逐个隔离错误)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.30 - 导入不再丢弃旧版链接监控)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -114,7 +114,13 @@ function normalizeImportedMonitor(value) {
   const type = value.type === 'element' || value.type === 'link' || value.type === 'download' ? 'element' : 'page';
   const attribute = type === 'element' ? ((value.attribute === 'href' || value.type === 'link' || value.type === 'download') ? 'href' : 'text') : '';
   const selector = type === 'element' ? String(value.selector || '').trim() : '';
-  if (type === 'element' && (!selector || selector.length > 4096)) return null;
+  // 旧版链接监控没有 selector，只有 targetHref/targetText：background 的
+  // migrateData 与 checkMonitor 都为这种记录保留 checkLink 回退路径，
+  // 这里若当成无效项丢弃，用户备份里的这类监控就会静默消失。
+  const targetHref = String(value.targetHref || '').trim().slice(0, MAX_URL_VALUE_CHARS);
+  const targetText = String(value.targetText || '').trim().slice(0, 200);
+  if (selector.length > 4096) return null;
+  if (type === 'element' && !selector && !targetHref && !targetText) return null;
   return {
     id: String(value.id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 6))),
     name: String(value.name || url).trim().slice(0, 60) || url,
@@ -123,8 +129,8 @@ function normalizeImportedMonitor(value) {
     type,
     selector,
     attribute,
-    targetHref: '',
-    targetText: '',
+    targetHref,
+    targetText,
     lastValue: limitMonitorValue(value.lastValue || '', attribute),
     createdAt: value.createdAt || new Date().toISOString(),
     updatedAt: Number(value.updatedAt) || 0,
@@ -132,7 +138,9 @@ function normalizeImportedMonitor(value) {
     lastCheck: '',
     lastCheckTime: 0,
     nextCheckTime: 0,
-    eventSeq: 0,
+    // eventSeq 参与跨设备去重的 eventKey 计算，重置成 0 会让导入后的监控
+    // 与历史里的旧事件撞上同一个 eventKey，导致该发的提醒被误吞。
+    eventSeq: Math.max(0, Number(value.eventSeq) || 0),
     failCount: 0,
     lastError: '',
     invalid: false,
