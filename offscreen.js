@@ -1,5 +1,5 @@
  /**
- * 333 Watcher - Offscreen Document (v0.6.43)
+ * 333 Watcher - Offscreen Document (v0.6.44)
  *
  * Service Worker 无 DOM，这里负责：
  * DOMParser 解析页面 HTML + querySelector 定位元素，返回属性值。
@@ -200,23 +200,33 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           if (abs === target || (el.getAttribute('src')||'') === target) { sendResponse({ ok: true, selector: buildSelector(el) }); return true; }
         }
       } else {
-        // text: 优先返回最深的匹配节点，避免 body/父容器抢占真实目标。
+        // text: 单遍扫描收集候选，最后统一决策。
+        // 关键约束：精确匹配（t === target）必须压过模糊匹配，且**与文档顺序无关**。
+        // 旧实现让模糊候选一命中就立即 return，排在后面的精确节点永远没机会被比较：
+        // 页面前部的"下载 X 版本"提示会抢走 selector，自愈把监控指到提示文案上 ——
+        // checkElement 拿错元素和基线一比立刻误报"已变化"，真目标怎么变都发现不了。
+        // 优先级：精确叶子 > 精确容器 > 模糊叶子。
         const all = doc.querySelectorAll('*');
-        let exactFallback = null;
+        let exactLeaf = null;
+        let exactContainer = null;
+        let fuzzyLeaf = null;
         let scanned = 0;
         for (const el of all) {
           if (scanned++ >= MAX_SCAN_NODES) break;
           const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          if (!t) continue;
           if (t === target) {
-            if (el.children.length === 0) { sendResponse({ ok: true, selector: buildSelector(el) }); return true; }
-            if (!exactFallback) exactFallback = el;
+            if (el.children.length === 0) { exactLeaf = el; break; }
+            if (!exactContainer) exactContainer = el;
+            continue;   // 精确命中的节点不再参与模糊候选
           }
           // 模糊匹配只接受叶子节点，避免把整页/卡片文本误判为目标。
-          if (!exactFallback && t && target.length < 80 && t.includes(target) && el.children.length === 0) {
-            sendResponse({ ok: true, selector: buildSelector(el) }); return true;
+          if (!fuzzyLeaf && target.length < 80 && t.includes(target) && el.children.length === 0) {
+            fuzzyLeaf = el;
           }
         }
-        if (exactFallback) { sendResponse({ ok: true, selector: buildSelector(exactFallback) }); return true; }
+        const hit = exactLeaf || exactContainer || fuzzyLeaf;
+        if (hit) { sendResponse({ ok: true, selector: buildSelector(hit) }); return true; }
         if (scanned >= MAX_SCAN_NODES) { sendResponse({ ok: false, error: 'DOM scan limit reached' }); return true; }
       }
       sendResponse({ ok: false, error: 'no matching element for ' + attr });

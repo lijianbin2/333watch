@@ -278,4 +278,91 @@ assert.equal(
   'picker.js and offscreen.js must keep the same DOWNLOAD_EXT (selector drift)'
 );
 
+// ---------------- find-by-value (text)：精确匹配必须压过模糊匹配 ----------------
+// 自愈是按"上次记住的文本"反查元素再写回 monitor.selector 的。旧实现单遍扫描里
+// 模糊候选一旦命中就立即 return，文档顺序上**排在后面**的精确匹配（t === target）
+// 根本没机会被比较。
+// 真实场景：页面前部是导航/提示文案（"下载 4.0.6.19 版本"），后部才是真正的目标
+// 叶子（`<span id="real-target">4.0.6.19</span>`）。旧实现会把 selector 永久写到
+// 前部那个提示元素上 —— checkElement 拿错元素和基线一比立刻误报一次"已变化"，
+// 而真目标后续怎么变都不会被发现。代码注释反复警告的"自愈盯错元素"就在这里。
+function loadOffscreenListener(elements) {
+  const context = {
+    console,
+    TextEncoder,
+    URL,
+    DOMParser: class {
+      parseFromString() {
+        return { querySelectorAll: () => elements, querySelector: () => null };
+      }
+    },
+    chrome: { runtime: { onMessage: { addListener(fn) { context.__listener = fn; } } } },
+  };
+  context.globalThis = context;
+  vm.createContext(context);
+  vm.runInContext(source, context);
+  return context.__listener;
+}
+
+// 最小元素桩：buildSelector 只用到 tagName / id / getAttribute / nodeType /
+// parentElement / parent.children，text 分支另外要 textContent 和 children.length。
+function textEl({ id, text, leaf = true, parent = null }) {
+  return {
+    nodeType: 1,
+    tagName: 'SPAN',
+    id: id || '',
+    textContent: text,
+    children: leaf ? [] : [{}],
+    parentElement: parent,
+    getAttribute: () => null,
+  };
+}
+
+function findByValueText(elements, target) {
+  const listener = loadOffscreenListener(elements);
+  let reply = null;
+  listener({ type: 'find-by-value', html: '<html></html>', attribute: 'text', value: target }, {}, (r) => {
+    reply = r;
+  });
+  return reply;
+}
+
+const bodyEl = { nodeType: 1, tagName: 'BODY', id: '', children: [], parentElement: null, getAttribute: () => null };
+const exactTarget = '4.0.6.19';
+// 文档顺序：模糊候选在前，精确命中在后。
+const fuzzyFirst = [
+  textEl({ id: 'nav-hint', text: '下载 ' + exactTarget + ' 版本', parent: bodyEl }),
+  textEl({ id: 'real-target', text: exactTarget, parent: bodyEl }),
+];
+assert.equal(
+  (findByValueText(fuzzyFirst, exactTarget) || {}).selector,
+  '#real-target',
+  'an exact text match later in document order must beat an earlier fuzzy match'
+);
+// 反向顺序（精确在前）本来就该命中精确 —— 防止修复只对某个顺序有效。
+assert.equal(
+  (findByValueText([...fuzzyFirst].reverse(), exactTarget) || {}).selector,
+  '#real-target',
+  'the exact match must win regardless of document order'
+);
+// 只有模糊候选、确实没有精确命中时，模糊能力不能被修掉。
+assert.equal(
+  (findByValueText([textEl({ id: 'only-fuzzy', text: '当前版本 ' + exactTarget, parent: bodyEl })], exactTarget) || {}).selector,
+  '#only-fuzzy',
+  'fuzzy matching must still work when no exact match exists'
+);
+// 精确命中的是容器（有子节点）时，只在没有精确叶子时用容器兜底。
+const containerOnly = findByValueText(
+  [textEl({ id: 'box', text: exactTarget, leaf: false, parent: bodyEl })],
+  exactTarget
+);
+assert.equal((containerOnly || {}).selector, '#box', 'an exact container is the fallback when no exact leaf exists');
+// 长文本不参与模糊匹配（避免整页文本误判），这条语义保持不变。
+const longTarget = 'x'.repeat(90);
+assert.equal(
+  (findByValueText([textEl({ id: 'long-holder', text: 'prefix ' + longTarget, parent: bodyEl })], longTarget) || {}).ok,
+  false,
+  'fuzzy matching must stay disabled for long targets'
+);
+
 console.log('offscreen-review tests passed');
