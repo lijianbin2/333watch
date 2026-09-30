@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.47 - offscreen 文档必定关闭)
+ * 333 Watcher - Background Service Worker (v0.6.48 - 角标刷新错误不再逃逸)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -1885,7 +1885,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.47)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.48)');
 
 
 
@@ -2043,13 +2043,20 @@ async function updateBadge() {
 // 历史变化时自动刷新角标（含 popup 标记已读后的清零）
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'sync' && changes[HISTORY_KEY]) {
-    updateBadge();
+    // 必须兜住：updateBadge 里有 pruneHistory / storage.sync.get / setBadgeText
+    // 三处都可能 reject（配额、瞬时存储错误、扩展正在卸载）。监听器里没人接的
+    // rejection 只会变成一条没有上下文的 "Uncaught (in promise)"，
+    // 角标静默不刷新却看不出原因。同 syncAlarms 的处理方式。
+    updateBadge().catch((err) => console.error('[333 Watcher] updateBadge failed:', err && err.message));
   }
 });
 
-chrome.runtime.onStartup.addListener(() => { updateBadge(); });
-chrome.runtime.onInstalled.addListener(() => { updateBadge(); });
-setTimeout(updateBadge, 0);
+const runBadgeUpdate = () => {
+  updateBadge().catch((err) => console.error('[333 Watcher] updateBadge failed:', err && err.message));
+};
+chrome.runtime.onStartup.addListener(runBadgeUpdate);
+chrome.runtime.onInstalled.addListener(runBadgeUpdate);
+setTimeout(runBadgeUpdate, 0);
 setTimeout(() => { try { ensurePruneAlarm(); } catch {} }, 1000);
 
 // ================= 启动补检 =================

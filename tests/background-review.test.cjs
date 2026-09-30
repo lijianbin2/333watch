@@ -1565,6 +1565,32 @@ async function test() {
   );
   chrome.runtime.sendMessage = realSendMessage;
 
+  // ---------------- 角标刷新不得产生未捕获的 rejection ----------------
+  // updateBadge 挂在 storage.onChanged / onStartup / onInstalled 上，
+  // 里面 pruneHistory、storage.sync.get、setBadgeText 都可能 reject。
+  // 旧实现三处都是裸调用，监听器里没人接的 rejection 只会变成一条
+  // 没有上下文的 "Uncaught (in promise)"，角标静默不刷新却看不出原因。
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  const realSetBadgeText = chrome.action.setBadgeText;
+  chrome.action.setBadgeText = async () => { throw new Error('badge unavailable during shutdown'); };
+  // 派发一次 sync/history 变更，走的是 storage.onChanged 的真实路径。
+  for (const fn of listeners.storage) {
+    fn({ history: { oldValue: [], newValue: [] } }, 'sync');
+  }
+  // 给 microtask 队列和定时器都留出机会，确认没有任何 rejection 逃出去。
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    unhandled.length,
+    0,
+    'the storage listener must not let a failing badge update escape as an unhandled rejection: ' +
+      unhandled.map(String).join(' | ')
+  );
+  chrome.action.setBadgeText = realSetBadgeText;
+  process.off('unhandledRejection', onUnhandled);
+
   stopClock();
   console.log('background-review tests passed');
 }

@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.47**
+当前版本：**v0.6.48**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -256,7 +256,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.47"
+$version = "0.6.48"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -277,6 +277,25 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.48
+
+- 修复未读角标刷新失败时会抛出**无上下文的未捕获 rejection**。
+  - `updateBadge()` 挂在 `storage.onChanged`（history 变化时）、`onStartup`、
+    `onInstalled` 和启动 `setTimeout` 四处，全部是裸调用。
+  - 它内部有三处可能 reject：`pruneHistory()` 读写的 `storage.sync`、
+    `getHistory()` 的 `storage.sync.get`、以及 `setBadgeText` /
+    `setBadgeBackgroundColor`（扩展正在卸载、或用户正在卸载时）。
+  - 监听器里没人接的 rejection 只会变成一条 `Uncaught (in promise)`
+    —— 没有任何上下文指明是角标出了问题，角标静默停在旧值上却看不出原因。
+    同一文件里 `syncAlarms()` 的 `storage.onChanged` 回调本来就有 `.catch`，
+    这里属于同一处的遗漏。
+  - 现在四处统一走 `runBadgeUpdate()`，失败时打出带上下文的消息
+    `[333 Watcher] updateBadge failed: ...`。
+- 新增 `background-review` 测试锁定这条路径：注册 `process.on('unhandledRejection')`，
+  把 `setBadgeText` 换成必定抛错的桩，再通过真实的 `storage.onChanged`
+  监听器派发一次 history 变更，断言没有任何 rejection 逃逸。该断言已用修复前的
+  `background.js` 反向验证会失败。
 
 ### v0.6.47
 
