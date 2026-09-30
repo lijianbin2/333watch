@@ -228,6 +228,58 @@ async function test() {
     'link text must be stripped of tags and whitespace-normalised'
   );
 
+  // ---------------- extractLinks：HTML 实体必须解码 ----------------
+  // picker 存基线读的是真实 DOM（textContent 已解码、a.href 已被 URL 解析），
+  // 而 extractLinks 只能正则解析源码，实体是源码形态 `&amp;`。
+  // 两侧形态不一致 → targetText / targetHref 永远匹配不上 →
+  // 监控误报"页面已无此链接目标"并被标记为失效。
+  // 下载/文档站点的链接文本里 `&` 极常见（AT&T、C++ & Go）。
+  assert.equal(
+    context.extractLinks('<a href="/dl/t.exe">AT&amp;T 下载</a>', linkBase)[0].text,
+    'AT&T 下载',
+    'named entities in link text must be decoded to match the DOM textContent'
+  );
+  assert.equal(
+    context.extractLinks('<a href="/dl/t.exe">Bob&#39;s Tools</a>', linkBase)[0].text,
+    "Bob's Tools",
+    'decimal numeric character references must be decoded'
+  );
+  assert.equal(
+    context.extractLinks('<a href="/dl/t.exe">Caf&#xe9; &amp; Bar</a>', linkBase)[0].text,
+    'Café & Bar',
+    'hexadecimal character references must be decoded'
+  );
+  // href 里的实体必须在 new URL 之前解码，否则地址本身就带着 &amp;。
+  assert.deepEqual(
+    linksOf('<a href="/dl/q.exe?a=1&amp;b=2">Q</a>'),
+    ['https://dl.test/dl/q.exe?a=1&b=2'],
+    'entities in an href must be decoded before URL resolution'
+  );
+  // 双重编码只能解一层。
+  assert.equal(
+    context.extractLinks('<a href="/dl/t.exe">&amp;amp;</a>', linkBase)[0].text,
+    '&amp;',
+    'a doubly-encoded entity must only be decoded once'
+  );
+  // 无分号的裸 & 保持原样（HTML 允许），不能被误吞。
+  assert.equal(
+    context.extractLinks('<a href="/dl/t.exe">A&B</a>', linkBase)[0].text,
+    'A&B',
+    'a bare ampersand without a semicolon must survive untouched'
+  );
+  // 未知实体保留原样，不能变成空串。
+  assert.equal(
+    context.extractLinks('<a href="/dl/t.exe">&notarealentity;</a>', linkBase)[0].text,
+    '&notarealentity;',
+    'an unknown entity must be left as-is rather than dropped'
+  );
+  // 非法/越界码点不能解码成 U+FFFD 替换字符。
+  assert.equal(
+    context.extractLinks('<a href="/dl/t.exe">&#x110000;x</a>', linkBase)[0].text,
+    '&#x110000;x',
+    'an out-of-range code point must not become a replacement character'
+  );
+
   const eventBase = {
     id: 'page-1',
     url: 'https://example.test/',

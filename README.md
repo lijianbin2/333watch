@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.36**
+当前版本：**v0.6.37**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -246,7 +246,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.36"
+$version = "0.6.37"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -267,6 +267,22 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.37
+
+- 修复**旧版链接监控在链接文本/地址含 HTML 实体时必然失效**的问题。
+  - 根因：picker 保存基线时读的是真实 DOM —— `textContent` 里的实体已解码、`a.href` 已被 `new URL()` 解析。而 Service Worker 没有 DOM，`checkLink` 只能用正则从 HTML 源码里抽链接，**实体仍是源码形态**。
+  - 两侧形态不一致，`targetText` / `targetHref` 的等值匹配**永远失败**：
+
+    | 页面源码 | picker 存入 | `extractLinks` 过去给出 |
+    | --- | --- | --- |
+    | `<a href="/x?a=1&amp;b=2">AT&amp;T 下载</a>` | `AT&T 下载` | `AT&amp;T 下载` |
+    | `<a href="/x?a=1&amp;b=2">…</a>` | `https://h/x?a=1&b=2` | `https://h/x?a=1&amp;b=2` |
+
+  - 后果：监控立即误报「页面已无此链接目标」，连续失败到阈值后被标记为**失效**。`AT&T`、`C++ & Go`、`R&D` 这类文案在下载页和文档站极常见。
+  - 修复：新增 `decodeEntities`，命名实体（`amp` / `lt` / `gt` / `quot` / `apos` / `nbsp` / `copy` / `mdash` / `ldquo` …）与数字实体（`&#39;` / `&#xe9;`）都在**单次扫描**内解码，避免 `&amp;amp;` 被解两次。`href` 在 `new URL()` **之前**解码 —— URL 解析不认 `&amp;`，不解码地址本身就带着它。
+  - 保守边界，避免"修出新的错"：未知实体、无分号的裸 `&`、越界码点（`&#x110000;`）、代理区码点全部**保留原样**。解出一个 U+FFFD 替换字符只会让匹配更糟。
+- 测试：新增 8 条回归断言（命名/十进制/十六进制实体、href 解码顺序、双重编码只解一层、裸 `&`、未知实体、越界码点）。已用 `git stash` 验证修复前必然失败。
 
 ### v0.6.36
 

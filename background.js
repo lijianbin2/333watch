@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.36 - 下载链接选择器站点标记降级)
+ * 333 Watcher - Background Service Worker (v0.6.37 - 链接实体解码修复)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -179,7 +179,41 @@ async function readResponseText(response, maxBytes) {
 }
 
 function stripTags(html) {
-  return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  return decodeEntities(html.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+}
+
+// HTML 实体解码。picker 存基线时读的是真实 DOM 的 textContent / 已解析的
+// a.href，实体早已解码；而这里只能正则解析 HTML 源码，实体仍是源码形态。
+// 两侧形态不一致会让 targetText / targetHref 匹配**永远失败**：
+//   <a href="/x?a=1&amp;b=2">AT&amp;T 下载</a>
+// picker 存的是 "AT&T 下载" + "https://h/x?a=1&b=2"，
+// extractLinks 过去给出 "AT&amp;T 下载" + "...&amp;b=2" → 匹配不上，
+// 监控随即误报"页面已无此链接目标"并被标记为失效。
+// 单次扫描同时匹配命名实体和数字实体，避免 "&amp;amp;" 被二次解码成 "&"。
+const NAMED_ENTITIES = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
+  copy: '©', reg: '®', trade: '™', hellip: '…',
+  mdash: '—', ndash: '–', lsquo: '‘', rsquo: '’',
+  ldquo: '“', rdquo: '”', middot: '·', bull: '•',
+  times: '×', divide: '÷', deg: '°', laquo: '«', raquo: '»'
+};
+const ENTITY_RE = /&(#[xX][0-9a-fA-F]+|#\d+|[a-zA-Z][a-zA-Z0-9]*);/g;
+function decodeEntities(text) {
+  const s = String(text == null ? '' : text);
+  if (s.indexOf('&') === -1) return s;
+  return s.replace(ENTITY_RE, (whole, body) => {
+    if (body[0] === '#') {
+      const isHex = body[1] === 'x' || body[1] === 'X';
+      const code = parseInt(isHex ? body.slice(2) : body.slice(1), isHex ? 16 : 10);
+      // 越界或非法码点一律保留原样：解码出一个替换字符只会让匹配更糟。
+      if (!Number.isFinite(code) || code <= 0 || code > 0x10ffff) return whole;
+      // 代理区码点不是合法字符，同样保留原样。
+      if (code >= 0xd800 && code <= 0xdfff) return whole;
+      try { return String.fromCodePoint(code); } catch { return whole; }
+    }
+    const key = body.toLowerCase();
+    return Object.prototype.hasOwnProperty.call(NAMED_ENTITIES, key) ? NAMED_ENTITIES[key] : whole;
+  });
 }
 
 // 从属性串里取指定属性的值，支持带引号 / 无引号两种写法。
@@ -207,7 +241,8 @@ function extractLinks(html, baseUrl) {
   const re = /<a\b((?:"[^"]*"|'[^']*'|[^>"'])*)>([\s\S]*?)<\/a>/gi;
   let m;
   while ((m = re.exec(html)) !== null) {
-    let href = attrValue(m[1], 'href');
+    // 必须在 new URL 之前解码：URL 解析不认 &amp;，解码后才是真实地址。
+    let href = decodeEntities(attrValue(m[1], 'href'));
     const text = stripTags(m[2]);
     if (!href || href.startsWith('javascript:') || href.startsWith('#') || href.startsWith('mailto:')) continue;
     try {
@@ -1736,7 +1771,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.36)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.37)');
 
 
 
