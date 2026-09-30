@@ -183,6 +183,54 @@ function test() {
     'an element monitor with neither selector nor link target is unusable'
   );
 
+  // ---------------- monitorKey：旧版链接监控不能互相吞掉 ----------------
+  // 旧版链接监控没有 selector，区分目标靠 targetHref/targetText。
+  // 旧实现的 key 只用 url + selector + attribute，同一页面上两条指向不同
+  // 下载地址的旧链接监控 key 完全相同：导入时 map.set 后者覆盖前者，
+  // 用户备份里明明有两条，导入后凭空少一条。
+  const legacyA = context.normalizeImportedMonitor({
+    url: 'https://example.test/f', type: 'element', attribute: 'href',
+    targetHref: 'https://example.test/win.zip',
+  });
+  const legacyB = context.normalizeImportedMonitor({
+    url: 'https://example.test/f', type: 'element', attribute: 'href',
+    targetHref: 'https://example.test/mac.zip',
+  });
+  assert.notEqual(
+    context.monitorKey(legacyA),
+    context.monitorKey(legacyB),
+    'two legacy link monitors with different targetHref must not share a key'
+  );
+  // 仅靠 targetText 区分的旧记录同样不能撞 key。
+  const byTextA = context.normalizeImportedMonitor({
+    url: 'https://example.test/g', type: 'element', attribute: 'text',
+    targetText: 'Win',
+  });
+  const byTextB = context.normalizeImportedMonitor({
+    url: 'https://example.test/g', type: 'element', attribute: 'text',
+    targetText: 'Mac',
+  });
+  assert.notEqual(
+    context.monitorKey(byTextA),
+    context.monitorKey(byTextB),
+    'two legacy monitors with different targetText must not share a key'
+  );
+  // 同一条监控重复导入仍必须命中同一个 key（去重语义不能被破坏）。
+  assert.equal(
+    context.monitorKey(legacyA),
+    context.monitorKey(context.normalizeImportedMonitor({
+      url: 'https://example.test/f/', type: 'element', attribute: 'href',
+      targetHref: 'https://example.test/win.zip',
+    })),
+    'the same legacy monitor must keep a stable key across imports'
+  );
+  // 带 selector 的常规监控 key 保持原样。
+  assert.equal(
+    context.monitorKey(el),
+    'element|https://example.test/b|#dl|href',
+    'selector-based monitors must keep their existing key shape'
+  );
+
   console.log('add-monitor-review tests passed');
 }
 

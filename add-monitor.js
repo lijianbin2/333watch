@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.33 - 下载链接选择器修复)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.34 - 旧版链接监控去重修复)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -92,7 +92,15 @@ function monitorKey(monitor) {
   const url = normalizeUrl(monitor && monitor.url || '');
   const type = (monitor && monitor.type) || 'page';
   if (type === 'page') return 'page|' + url;
-  return 'element|' + url + '|' + (monitor.selector || '') + '|' + (monitor.attribute || 'text');
+  const selector = (monitor && monitor.selector) || '';
+  const attribute = (monitor && monitor.attribute) || 'text';
+  // 旧版链接监控没有 selector，区分目标全靠 targetHref/targetText。
+  // 少了这一段，同一页面上两条指向不同下载地址的旧监控会撞成同一个 key，
+  // 导入时被后者覆盖 —— 用户备份里的监控凭空少一条。
+  if (!selector) {
+    return 'element|' + url + '|' + (monitor.targetHref || '') + '|' + (monitor.targetText || '') + '|' + attribute;
+  }
+  return 'element|' + url + '|' + selector + '|' + attribute;
 }
 
 function clampInterval(value, fallback) {

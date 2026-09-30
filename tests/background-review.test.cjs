@@ -1044,6 +1044,33 @@ async function test() {
   assert.equal(syncStore.get('monitors').length, 1, 'legacy watchers become monitors');
   assert.equal(syncStore.get('monitors')[0].url, 'https://legacy.test');
 
+  // 迁移去重不能吞掉旧版链接监控：这些记录没有 selector，区分目标靠
+  // targetHref/targetText。旧 monitorKey 只用 url+selector+attribute，
+  // 于是同一页面上的 win.zip / mac.zip 两条监控 key 相同，每次启动迁移
+  // 都会被合并成一条 —— 这是无声的数据丢失，不是显示问题。
+  syncStore.clear();
+  syncStore.set('monitors', [
+    { id: 'old-win', url: 'https://legacy.test/dl', type: 'element', attribute: 'href', targetHref: 'https://legacy.test/win.zip', createdAt: '2026-09-01T00:00:00.000Z' },
+    { id: 'old-mac', url: 'https://legacy.test/dl', type: 'element', attribute: 'href', targetHref: 'https://legacy.test/mac.zip', createdAt: '2026-09-02T00:00:00.000Z' },
+    { id: 'old-text-a', url: 'https://legacy.test/dl', type: 'element', attribute: 'text', targetText: 'Windows', createdAt: '2026-09-03T00:00:00.000Z' },
+    { id: 'old-text-b', url: 'https://legacy.test/dl', type: 'element', attribute: 'text', targetText: 'macOS', createdAt: '2026-09-04T00:00:00.000Z' },
+    { id: 'old-dup', url: 'https://legacy.test/dl', type: 'element', attribute: 'href', targetHref: 'https://legacy.test/win.zip', createdAt: '2026-09-05T00:00:00.000Z' },
+  ]);
+  await context.migrateData();
+  const afterMigrate = syncStore.get('monitors');
+  assert.equal(
+    afterMigrate.length, 4,
+    'migration must keep both legacy link targets and only collapse the true duplicate'
+  );
+  // migrateData 在 vm realm 里跑，写回的数组原型不是宿主的 Array，
+  // deepEqual 会因原型不同误报，这里换回宿主数组再比。
+  const keptTargets = Array.from(afterMigrate, (m) => m.targetHref + '|' + m.targetText).sort();
+  assert.deepEqual(
+    keptTargets,
+    ['https://legacy.test/mac.zip|', 'https://legacy.test/win.zip|', '|Windows', '|macOS'],
+    'migration must keep each distinct legacy link monitor'
+  );
+
   stopClock();
   console.log('background-review tests passed');
 }

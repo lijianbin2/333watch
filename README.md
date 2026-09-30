@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.33**
+当前版本：**v0.6.34**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -246,7 +246,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.33"
+$version = "0.6.34"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -267,6 +267,15 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.34
+
+- 修复旧版链接监控被静默吞掉（无声的数据丢失）。`monitorKey` 是监控去重的唯一依据，但它的 key 只由 `url + selector + attribute` 组成，而**旧版链接监控根本没有 selector** —— 区分目标全靠 `targetHref`/`targetText`。结果是同一页面上的多条旧链接监控 key 完全相同：
+  - `migrateData` 的去重每次启动/安装都会跑，命中 key 后只保留 `updatedAt`/`createdAt` 最新的那条 —— 测试里 5 条旧链接监控被合并成 2 条，**每开一次浏览器就再丢一批**，且界面上没有任何提示；
+  - 导入备份走 `import-by-key`（`map.set`）同理，后导入的覆盖先导入的，"新增 N 条"的计数也跟着错。
+- 修复方式：无 selector 的记录把 `targetHref`/`targetText` 纳入 key。带 selector 的常规监控 key 形状保持不变，不影响既有的去重语义；同一条旧监控重复导入仍稳定命中同一个 key。
+- `background.js` 与 `add-monitor.js` 各有一份 `monitorKey`（popup 无 background 时要用自己的 fallback），两处同步修改。
+- 新增回归测试：background 侧直接跑 `migrateData`，断言 5 条旧链接监控（win.zip / mac.zip / 两个 targetText + 1 条真重复）迁移后保留 4 条、且只折叠那 1 条真重复；add-monitor 侧断言 key 的区分性与稳定性。两组均已用 `git stash` 验证在修复前必然失败（`actual: 2, expected: 4`）。
 
 ### v0.6.33
 

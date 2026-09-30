@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.33 - 下载链接选择器修复)
+ * 333 Watcher - Background Service Worker (v0.6.34 - 旧版链接监控去重修复)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -52,7 +52,15 @@ function monitorKey(monitor) {
   const url = normalizeUrl(monitor && monitor.url || '');
   const type = (monitor && monitor.type) || 'page';
   if (type === 'page') return 'page|' + url;
-  return 'element|' + url + '|' + (monitor.selector || '') + '|' + (monitor.attribute || 'text');
+  const selector = (monitor && monitor.selector) || '';
+  const attribute = (monitor && monitor.attribute) || 'text';
+  // 旧版链接监控没有 selector，区分目标全靠 targetHref/targetText。
+  // 不把它们算进 key，同一页面上两条指向不同下载地址的旧监控 key 完全相同：
+  // 导入/去重时后者覆盖前者，用户备份里的监控凭空少一条。
+  if (!selector) {
+    return 'element|' + url + '|' + (monitor.targetHref || '') + '|' + (monitor.targetText || '') + '|' + attribute;
+  }
+  return 'element|' + url + '|' + selector + '|' + attribute;
 }
 
 function limitMonitorValue(value, attribute) {
@@ -1663,7 +1671,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.33)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.34)');
 
 
 
