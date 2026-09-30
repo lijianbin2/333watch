@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.22 - notification event hardening)
+ * 333 Watcher - Background Service Worker (v0.6.23 - notification claim deduplication)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -18,6 +18,7 @@ const TEST_STORAGE_KEY = TEST_STORAGE_KEY_LEGACY; // legacy compat
 const ALARM_PREFIX = 'monitor-';
 const PRUNE_ALARM = '333-prune-history';
 const _checkLock = new Set();
+const _pendingNotificationKeys = new Set();
 const DEFAULT_INTERVAL = 500;
 const INVALID_THRESHOLD = 2;
 const FETCH_TIMEOUT_MS = 20000;
@@ -62,6 +63,10 @@ function nextEventSequence(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0) return 1;
   return Math.min(2147483647, Math.floor(n) + 1);
+}
+
+function waitMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function stripHeavy(html) {
@@ -745,7 +750,9 @@ async function checkMonitor(monitor) {
   const nowTs = Date.now();
   const wasInvalid = !!monitors[idx].invalid;
   const firstBaseline = monitors[idx].baselined === false;
-  const eventSeq = outcome.changed ? nextEventSequence(monitors[idx].eventSeq) : (Number(monitors[idx].eventSeq) || 0);
+  const changeEventSeq = outcome.changed ? nextEventSequence(monitors[idx].eventSeq) : (Number(monitors[idx].eventSeq) || 0);
+  // 恢复事件也消耗一个序号，避免同一监控多次“失效 -> 恢复”被合并。
+  const eventSeq = wasInvalid ? nextEventSequence(changeEventSeq) : changeEventSeq;
   monitors[idx] = {
     ...monitors[idx],
     ...outcome.update,
@@ -844,6 +851,90 @@ async function hasReadEvent(event) {
   });
 }
 
+function isActiveClaim(h) {
+  if (!h || !h.pending) return false;
+  const age = Date.now() - (new Date(h.claimAt || h.time || 0).getTime() || 0);
+  return age < 2 * 60 * 1000;
+}
+
+function hasSeenEvent(event, history) {
+  return (Array.isArray(history) ? history : []).some(h => {
+    if (!h) return false;
+    if (event.eventKey && h.eventKey) {
+      if (h.eventKey !== event.eventKey) return false;
+      // 崩溃遗留的短期 pending 认领不应永久阻塞通知。
+      return h.pending ? isActiveClaim(h) : true;
+    }
+    // 旧版本没有 eventKey，只对已读记录兼容匹配，避免误吞新的未读事件。
+    return h.read === true && h.url === event.url && h.message === event.message;
+  });
+}
+
+async function claimNotificationEvent(event, record) {
+  const history = await getHistory();
+  if (hasSeenEvent(event, history)) {
+    return { claimed: false, reason: 'already-recorded' };
+  }
+  const claim = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+    name: record.name,
+    url: record.url,
+    time: new Date().toISOString(),
+    claimAt: Date.now(),
+    message: record.message,
+    eventKey: event.eventKey,
+    kind: record.kind || 'change',
+    read: false,
+    pending: true
+  };
+  await saveHistory([claim, ...history]);
+  return { claimed: true, claimId: claim.id };
+}
+
+async function completeNotificationClaim(claimId, delivered) {
+  if (!claimId) return;
+  const history = await getHistory();
+  const next = history.map(h => {
+    if (!h || h.id !== claimId) return h;
+    const updated = { ...h, pending: false };
+    if (delivered) updated.delivered = true;
+    else updated.failed = true;
+    return updated;
+  });
+  if (!delivered) {
+    // 发送失败时删除认领，让下一次检查可以重试。
+    await saveHistory(next.filter(h => !h || h.id !== claimId));
+  } else {
+    await saveHistory(next);
+  }
+}
+
+async function notifyOnce(event, record, notifId, title) {
+  if (_pendingNotificationKeys.has(event.eventKey)) {
+    return { ok: true, skipped: true, error: null };
+  }
+  _pendingNotificationKeys.add(event.eventKey);
+  let claim;
+  try {
+    claim = await claimNotificationEvent(event, record);
+    if (!claim.claimed) {
+      return { ok: true, skipped: true, error: null };
+    }
+    // 给另一台设备同步 pending 认领的时间；同一事件的并发发送最多保留一台。
+    await waitMs(600);
+    const latest = await getHistory();
+    const own = latest.find(h => h && h.id === claim.claimId);
+    if (!own) {
+      return { ok: true, skipped: true, error: null };
+    }
+    const result = await sendNotification(notifId, title, record.message);
+    await completeNotificationClaim(claim.claimId, result.ok);
+    return result;
+  } finally {
+    _pendingNotificationKeys.delete(event.eventKey);
+  }
+}
+
 async function notifyChange(monitor, change) {
   const notifId = 'notif-' + monitor.id;
   const title = '333 Watcher';
@@ -871,54 +962,31 @@ async function notifyChange(monitor, change) {
     newValue: change && change.newValue,
     sequence: monitor.eventSeq
   });
-  if (await hasReadEvent(event)) {
-    dbg('[333 Watcher] notification skipped: synced history already read:', event.eventKey);
-    return { ok: true, skipped: true, error: null };
-  }
-
-  const result = await sendNotification(notifId, title, message);
-  if (!result.ok) {
-    console.error('[333 Watcher] 通知发送失败，error =', result.error);
-  } else {
-    // 写入通知历史（chrome.storage.sync，跨设备同步）
-    await addHistory({
-      name: monitor.name || monitor.url,
-      url: monitor.url,
-      message: message,
-      eventKey: event.eventKey,
-      kind: 'change'
-    });
-  }
+  const result = await notifyOnce(event, {
+    name: monitor.name || monitor.url,
+    url: monitor.url,
+    message: message,
+    kind: 'change'
+  }, notifId, title);
+  if (!result.ok) console.error('[333 Watcher] 通知发送失败，error =', result.error);
   return result;
 }
 
 async function notifyInvalid(monitor, reason) {
   const name = monitor.name || monitor.url;
   const message = '"' + name + '" 监控失效：' + reason + '\n请检查网址是否有效，或重新拾取元素';
-  const event = buildNotificationEvent(monitor, 'invalid', message, { reason: reason });
-  if (await hasReadEvent(event)) {
-    dbg('[333 Watcher] notification skipped: synced history already read:', event.eventKey);
-    return { ok: true, skipped: true, error: null };
-  }
-  const result = await sendNotification('notif-invalid-' + monitor.id, '333 Watcher · 监控失效', message);
-  if (result.ok) {
-    await addHistory({ name: name, url: monitor.url, message: message, eventKey: event.eventKey, kind: 'invalid' });
-  }
-  return result;
+  const event = buildNotificationEvent(monitor, 'invalid', message, { reason: reason, sequence: monitor.eventSeq });
+  return notifyOnce(event, {
+    name: name, url: monitor.url, message: message, kind: 'invalid'
+  }, 'notif-invalid-' + monitor.id, '333 Watcher · 监控失效');
 }
 async function notifyRecovered(monitor) {
   const name = monitor.name || monitor.url;
   const message = '"' + name + '" 已恢复正常 ✓';
-  const event = buildNotificationEvent(monitor, 'recovered', message);
-  if (await hasReadEvent(event)) {
-    dbg('[333 Watcher] notification skipped: synced history already read:', event.eventKey);
-    return { ok: true, skipped: true, error: null };
-  }
-  const result = await sendNotification('notif-recovered-' + monitor.id, '333 Watcher · 监控恢复', message);
-  if (result.ok) {
-    await addHistory({ name: name, url: monitor.url, message: message, eventKey: event.eventKey, kind: 'recovered' });
-  }
-  return result;
+  const event = buildNotificationEvent(monitor, 'recovered', message, { sequence: monitor.eventSeq });
+  return notifyOnce(event, {
+    name: name, url: monitor.url, message: message, kind: 'recovered'
+  }, 'notif-recovered-' + monitor.id, '333 Watcher · 监控恢复');
 }
 async function markCheckFailure(monitorId, checkedAt, reason, kind) {
   try {
@@ -930,6 +998,9 @@ async function markCheckFailure(monitorId, checkedAt, reason, kind) {
     const wasInvalid = !!prev.invalid;
     const nowTs = Date.now();
     const shouldInvalid = failCount >= INVALID_THRESHOLD;
+    const eventSeq = shouldInvalid && !wasInvalid
+      ? nextEventSequence(prev.eventSeq)
+      : (Number(prev.eventSeq) || 0);
     list[i] = {
       ...prev,
       lastError: reason,
@@ -939,7 +1010,8 @@ async function markCheckFailure(monitorId, checkedAt, reason, kind) {
       nextCheckTime: nowTs + Math.max(1, Number(prev.interval) || DEFAULT_INTERVAL) * 60000,
       invalid: wasInvalid || shouldInvalid,
       invalidReason: (wasInvalid || shouldInvalid) ? reason : (prev.invalidReason || ''),
-      invalidSince: wasInvalid ? (prev.invalidSince || checkedAt) : (shouldInvalid ? checkedAt : (prev.invalidSince || null))
+      invalidSince: wasInvalid ? (prev.invalidSince || checkedAt) : (shouldInvalid ? checkedAt : (prev.invalidSince || null)),
+      eventSeq
     };
     await saveMonitors(list);
     if (shouldInvalid && !wasInvalid) {
@@ -1148,7 +1220,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-dbg('[333 Watcher] Background service worker loaded (v0.6.22)');
+dbg('[333 Watcher] Background service worker loaded (v0.6.23)');
 
 
 
@@ -1211,6 +1283,8 @@ async function pruneHistory() {
     if (!history.length) return;
     const cutoff = Date.now() - HISTORY_READ_RETENTION_MS;
     const kept = history.filter((h) => {
+      // 崩溃或进程被杀留下的未完成认领，不再具备抑制作用，直接丢弃。
+      if (h && h.pending && !isActiveClaim(h)) return false;
       if (!h.read) return true;
       const readAt = Number(h.readAt) || new Date(h.time).getTime() || 0;
       return readAt >= cutoff;

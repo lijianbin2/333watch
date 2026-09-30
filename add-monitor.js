@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.22 - notification event hardening)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.23 - notification claim deduplication)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -215,12 +215,23 @@ async function saveHistory(history) {
 
 // 清理已读通知：超过保留期后自动删除，避免历史无限累积
 const HISTORY_READ_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const CLAIM_TTL_MS = 2 * 60 * 1000;
+
+// 未完成的跨设备事件认领在 TTL 内有效，超时视为失效（发送端崩溃残留）。
+function isActiveHistoryClaim(h) {
+  if (!h || !h.pending) return false;
+  const ts = Number(h.claimAt) || new Date(h.time || 0).getTime() || 0;
+  return Date.now() - ts < CLAIM_TTL_MS;
+}
+
 async function pruneHistory() {
   try {
     const history = await getHistory();
     if (!history.length) return;
     const cutoff = Date.now() - HISTORY_READ_RETENTION_MS;
     const kept = history.filter((h) => {
+      // 清理过期未完成的跨设备事件认领（发送进程崩溃时可能残留）。
+      if (h && h.pending && !isActiveHistoryClaim(h)) return false;
       if (!h.read) return true;
       const readAt = Number(h.readAt) || new Date(h.time).getTime() || 0;
       return readAt >= cutoff;
@@ -236,7 +247,8 @@ async function pruneHistory() {
 // ---- 未读数显示 ----
 async function renderUnread() {
   await pruneHistory();
-  const history = await getHistory();
+  // 尚未确认投递的事件认领不算提醒，避免失败/竞争时出现幽灵未读。
+  const history = (await getHistory()).filter((h) => !h || !h.pending);
   const unread = history.filter((h) => !h.read).length;
 
   unreadBadge.textContent = unread;
@@ -298,7 +310,8 @@ async function markHistoryItemRead(id) {
 async function markAllHistoryRead() {
   const history = await getHistory();
   if (!history.some((h) => !h.read)) return;
-  await saveHistory(history.map((h) => ({ ...h, read: true, readAt: Date.now() })));
+  // 不触碰尚未完成投递的事件认领，避免影响跨设备去重判断。
+  await saveHistory(history.map((h) => (h && h.pending ? h : { ...h, read: true, readAt: Date.now() })));
   renderUnread();
 }
 
@@ -336,7 +349,7 @@ function formatTime(iso) {
 }
 
 async function renderHistoryList() {
-  const history = await getHistory();
+  const history = (await getHistory()).filter((h) => !h || !h.pending);
   historyList.innerHTML = '';
 
   if (history.length === 0) {
