@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.27 - device-aware claim arbitration window)
+ * 333 Watcher - Background Service Worker (v0.6.28 - flaky baseline write-back never rolls back)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -920,6 +920,14 @@ async function checkMonitor(monitor) {
           await mutateMonitors((list) => {
             const idx = list.findIndex((m) => m.id === monitor.id);
             if (idx === -1) return false;
+            // 只有基线仍是本轮刚写入的那个值时才回写：二次抓取期间别的设备/轮次
+            // 可能已经把基线推进到更新的值（并已据此发过通知），此时回写会把基线
+            // 倒回去，让这次变化被反复判定 —— 正是跨设备重复提醒的根因。
+            const expected = normalizedBaseline(saved.lastValue);
+            if (normalizedBaseline(list[idx].lastValue) !== expected) {
+              dbg('[333 Watcher] flaky baseline superseded, skip write-back:', monitor.url);
+              return false;
+            }
             list[idx] = { ...list[idx], lastValue: confirmRes.value };
             return true;
           });
@@ -1587,7 +1595,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.27)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.28)');
 
 
 

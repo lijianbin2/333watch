@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.27 - 迁移失败不再丢数据)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.28 - 抖动回写不再倒推基线)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）

@@ -637,6 +637,69 @@ async function test() {
   );
   assert.equal(notificationCount, 1, 'the retried round notifies exactly once after storage recovers');
 
+  // ---- 抖动（二次确认不一致）回写基线时，不得把别的设备已推进的基线倒回去 ----
+  // 场景：本机第一次抓到 a.zip -> changed 并已把基线写成 a.zip；二次确认抓到
+  // b.zip -> 判定抖动、不发通知。此时另一台设备已把基线推进到更新的 c.zip，
+  // 抖动回写若无条件写 b.zip，就会把基线倒推，让同一次变化被反复判定、重复通知。
+  syncStore.clear();
+  notificationCount = 0;
+  const linkHtml = (href) => `<html><body><a href="${href}">Download</a></body></html>`;
+  const flakyMonitor = {
+    id: 'dl-flaky',
+    name: 'flaky',
+    url: 'https://example.test/download',
+    type: 'download',
+    interval: 5,
+    targetText: 'Download',
+    lastValue: 'https://example.test/old.zip',
+    baselined: true,
+    eventSeq: 4,
+  };
+  syncStore.set('monitors', [{ ...flakyMonitor }]);
+  const fetched = [];
+  context.__setFetch(async () => {
+    const href = fetched.length === 0 ? 'https://example.test/a.zip' : 'https://example.test/b.zip';
+    fetched.push(href);
+    const html = linkHtml(href);
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => String(html.length) },
+      body: null,
+      text: async () => html,
+    };
+  });
+  // 模拟"二次确认期间别的设备把基线推进到 c.zip"：在抖动回写读到列表时注入。
+  const realSyncGetForFlaky = chrome.storage.sync.get;
+  let injectedFlaky = false;
+  chrome.storage.sync.get = async (key) => {
+    const data = await realSyncGetForFlaky(key);
+    const list = data && data.monitors;
+    if (!injectedFlaky && key === 'monitors' && Array.isArray(list)
+        && list[0] && list[0].lastValue === 'https://example.test/a.zip') {
+      injectedFlaky = true;
+      syncStore.set('monitors', list.map((m) => (
+        m.id === flakyMonitor.id ? { ...m, lastValue: 'https://example.test/c.zip' } : m
+      )));
+      return { monitors: syncStore.get('monitors') };
+    }
+    return data;
+  };
+  let flakyResult;
+  try {
+    flakyResult = await context.checkMonitor(flakyMonitor);
+  } finally {
+    chrome.storage.sync.get = realSyncGetForFlaky;
+  }
+  assert.equal(injectedFlaky, true, 'the flaky write-back must have reached the storage read');
+  assert.equal(flakyResult, 'flaky', 'an unstable second fetch must be reported as flaky');
+  assert.equal(notificationCount, 0, 'a flaky change must not notify');
+  assert.equal(
+    syncStore.get('monitors')[0].lastValue,
+    'https://example.test/c.zip',
+    'a flaky write-back must not roll the baseline back over a newer value'
+  );
+
   // ---- monitors 整键读-改-写必须串行化，否则并发写入互相覆盖 ----
   syncStore.clear();
   // 给 storage 读加延迟：没有互斥锁时两个读会交错，导致后写者覆盖先写者。
