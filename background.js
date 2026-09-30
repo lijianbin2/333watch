@@ -34,7 +34,6 @@ const CLAIM_WINDOW_MULTI_MS = 5000;
 const CLAIM_WINDOW_SINGLE_MS = 600;
 const CLAIM_POLL_MS = 250;
 const DEVICE_ID_KEY = '_333_device_id';
-const FOREIGN_DEVICE_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
 // ---------------- 工具 ----------------
 function simpleHash(str) {
