@@ -1394,6 +1394,125 @@ async function test() {
     'reassigning ids must not drop or rename any monitor'
   );
 
+  // ---------------- 监控失效提醒的跨设备去重 ----------------
+  // 用户反馈"在 A 电脑已经提醒过的内容，换到 B 电脑又收到一次"。
+  // 变化类通知的 eventKey 只含基线值，两台设备算得一致；但"监控失效"不一样：
+  // 它的 reason 来自 fetch 抛出的 err.message，强烈依赖本机网络环境 ——
+  // 断网是 'Failed to fetch'、DNS 故障是 'net::ERR_NAME_NOT_RESOLVED'、
+  // 反代拦截会变成 'HTTP 502'、超时被翻成 '请求超时'。
+  // markCheckFailure 还会把 '（连续失败 N 次）' 拼进 reason，而两台设备的
+  // 失败计数未必同步到同一步。同一场故障因此算出多个不同 eventKey：
+  // deliveredEvents 查不到对方的标记，仲裁也认不出对手，各发一条。
+  //
+  // 先走真实链路：两台设备各自从"已失败 1 次、尚未失效"的同一基线出发，
+  // 只是本机网络环境不同，于是 fetch 抛出的错误原文不同。
+  syncStore.clear();
+  localStore.clear();
+  notificationCount = 0;
+  const invMonitor = {
+    id: 'inv-e2e',
+    name: '公告页',
+    url: 'https://inv.test/page',
+    type: 'page',
+    interval: 5,
+    lastHash: 'h1',
+    baselined: true,
+    eventSeq: 7,
+    failCount: 1,
+    invalid: false,
+  };
+  // 设备 A：断网
+  syncStore.set('monitors', [plain(invMonitor)]);
+  context.__setFetch(async () => { throw new TypeError('Failed to fetch'); });
+  await context.checkMonitor(plain(invMonitor));
+  assert.equal(notificationCount, 1, 'device A must send the invalid notification');
+  const deliveredAfterA = Object.keys(syncStore.get('deliveredEvents') || {});
+  assert.equal(deliveredAfterA.length, 1, 'device A must leave a delivered marker for other devices');
+
+  // 设备 B：同一时刻也判定失败，但它读到的是自己的旧基线（storage.sync 尚未
+  // 把它那次 invalid 写回传播过来），而 DNS 故障的错误原文与 A 不同。
+  syncStore.set('monitors', [plain(invMonitor)]);
+  context.__setFetch(async () => { throw new TypeError('net::ERR_NAME_NOT_RESOLVED'); });
+  await context.checkMonitor(plain(invMonitor));
+  assert.equal(
+    notificationCount,
+    1,
+    'a second device must not repeat the invalid notification for the same outage'
+  );
+  assert.equal(
+    syncStore.get('monitors')[0].invalid,
+    true,
+    'the stored monitor must still be marked invalid'
+  );
+
+  // 反过来校验：真正的再次失效（用户修好后又坏）必须还能再次提醒。
+  // 事件序号不同 -> 不该被上一轮的已投递标记误吞。
+  syncStore.clear();
+  localStore.clear();
+  notificationCount = 0;
+  const revived = { ...invMonitor, eventSeq: 12, failCount: 1, invalid: false };
+  syncStore.set('monitors', [plain(revived)]);
+  context.__setFetch(async () => { throw new TypeError('Failed to fetch'); });
+  await context.checkMonitor(plain(revived));
+  assert.equal(
+    notificationCount,
+    1,
+    'a genuine later outage must still notify despite an older delivered marker'
+  );
+
+  // 以下为纯函数级断言，锁住"失效身份 = 监控 + 迁移序号"这条规则本身。
+  const inv = { id: 'inv-1', name: '公告页', url: 'https://ex.test/p', type: 'page', eventSeq: 7 };
+  const invalidKey = (reason) => {
+    const message = '"公告页" 监控失效：' + reason + '\n请检查网址是否有效，或重新拾取元素';
+    return context.buildNotificationEvent(inv, 'invalid', message, {
+      sequence: inv.eventSeq,
+      stableMessage: '"公告页" 监控失效'
+    }).eventKey;
+  };
+  assert.equal(
+    invalidKey('Failed to fetch（连续失败 2 次）'),
+    invalidKey('net::ERR_NAME_NOT_RESOLVED（连续失败 2 次）'),
+    'same outage must dedup across devices even when fetch error text differs'
+  );
+  assert.equal(
+    invalidKey('HTTP 503（连续失败 3 次）'),
+    invalidKey('HTTP 503（连续失败 2 次）'),
+    'the fail-count suffix must not split one outage into per-device events'
+  );
+  assert.equal(
+    invalidKey('请求超时（连续失败 2 次）'),
+    invalidKey('Failed to fetch（连续失败 2 次）'),
+    'timeout and offline are both "site unreachable" to the user'
+  );
+  // 真正的再次失效仍必须能再次提醒：状态迁移序号变了就是新事件。
+  assert.notEqual(
+    invalidKey('Failed to fetch（连续失败 2 次）'),
+    context.buildNotificationEvent(
+      { ...inv, eventSeq: 12 },
+      'invalid',
+      '"公告页" 监控失效：Failed to fetch\n请检查网址是否有效，或重新拾取元素',
+      { sequence: 12, stableMessage: '"公告页" 监控失效' }
+    ).eventKey,
+    'a later invalid transition must remain a distinct event'
+  );
+  // 不同监控即便序号相同也必须各自提醒：monitorKey 与 name 都要参与去重。
+  assert.notEqual(
+    invalidKey('Failed to fetch（连续失败 2 次）'),
+    context.buildNotificationEvent(
+      { ...inv, url: 'https://ex.test/other', id: 'inv-2' },
+      'invalid',
+      '"公告页" 监控失效：Failed to fetch\n请检查网址是否有效，或重新拾取元素',
+      { sequence: inv.eventSeq, stableMessage: '"公告页" 监控失效' }
+    ).eventKey,
+    'two different monitors must not share one invalid event'
+  );
+  // 变化类通知没有 stableMessage，正文本身即稳定输入，行为不应被改变。
+  assert.equal(
+    context.buildNotificationEvent(inv, 'change', '"公告页" 页面发生变化', { sequence: 7 }).eventKey,
+    context.buildNotificationEvent(inv, 'change', '"公告页" 页面发生变化', { sequence: 7 }).eventKey,
+    'change events stay deterministic without stableMessage'
+  );
+
   stopClock();
   console.log('background-review tests passed');
 }

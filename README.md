@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.44**
+当前版本：**v0.6.45**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -246,7 +246,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.44"
+$version = "0.6.45"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -267,6 +267,31 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.45
+
+- 修复**「监控失效」提醒在多设备间必然重复触发，导致用户反馈的"换台电脑又收到一次"**。
+  - 背景：`background.js` 的 `buildNotificationEvent` 把 `reason` 和**通知正文**一起
+    算进 `eventKey`。跨设备去重的整套机制（`deliveredEvents` 独立标记 + `rivalClaimsOf`
+    确定性仲裁）全都以 `eventKey` 相同为前提 —— key 一旦不同，双方既查不到对方的已投递
+    标记、也认不出对方是竞争对手，于是各自判定"无人竞争"并各自发送。
+  - 危害：`notifyInvalid` 的 `reason` 恰恰是**强烈依赖本机网络环境的错误原文**：断网是
+    `Failed to fetch`、DNS 故障是 `net::ERR_NAME_NOT_RESOLVED`、反代拦截会变成
+    `HTTP 502`、超时被 `fetchWithTimeout` 翻成 `请求超时`。`markCheckFailure` 还会往里
+    拼「连续失败 N 次」，而两台设备的失败计数未必同步到同一步。同一场故障因此必然算出
+    不同 `eventKey` —— 这条路径的跨设备去重**从来没有生效过**，每次失效都会每台设备各发一条。
+  - 修法：失效提醒的 `eventKey` 不再包含 `reason`，正文改用设备无关的 `stableMessage`
+    参与哈希。失效是一次状态迁移，`markCheckFailure` 每次迁移只把 `eventSeq` +1，
+    用它当身份即可：同一场故障两台设备的序号相同 → 去重生效；用户修好后再次失效序号又
+    不同 → 仍能再次提醒。**通知正文照旧保留原始错误文案**，排查体验不受影响。
+- 修正 `notifyRecovered` 与 `notifyInvalid` 的**不对称**：`notifyRecovered` 本来就只传
+  `sequence`、不传 `reason`，同一监控的"失效"和"恢复"因此一直使用两套不同的 key 规则。
+  现在两者统一为「监控 + 状态迁移序号」。
+- 测试：新增端到端用例，模拟两台设备从**同一条基线**（已失败 1 次、尚未失效）出发，
+  但 A 因断网抛出 `Failed to fetch`、B 因 DNS 故障抛出 `net::ERR_NAME_NOT_RESOLVED`，
+  断言整个 `checkMonitor` 真实链路上**只发出 1 条**失效提醒（A 发出后留下 `deliveredEvents`
+  标记，B 必须被吞掉）；并反向断言用户修好后**再次失效仍能提醒**（序号变了就是新事件），
+  以及两条不同监控不会共用同一个失效事件。已验证该用例在修复前必然失败（发出 2 条）。
 
 ### v0.6.44
 

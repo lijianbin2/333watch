@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.44 - history 整键读改写单一写者)
+ * 333 Watcher - Background Service Worker (v0.6.45 - 失效提醒跨设备去重)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -1089,7 +1089,10 @@ function buildNotificationEvent(monitor, kind, message, details) {
     String(values.newValue == null ? '' : values.newValue),
     String(values.reason == null ? '' : values.reason),
     String(values.sequence == null ? '' : values.sequence),
-    String(message || '')
+    // stableMessage 用于"正文里混进了各设备不同的原文"的场景（监控失效）：
+    // 正文保留原始错误便于排查，但参与去重的必须是设备无关的文本，
+    // 否则同一场故障会算出多个 eventKey，跨设备去重整体失效。
+    String(values.stableMessage != null ? values.stableMessage : (message || ''))
   ].join('\u001f');
   return {
     eventKey: 'v1-' + simpleHash(stableValue),
@@ -1456,7 +1459,19 @@ async function safeNotify(kind, monitor, change) {
 async function notifyInvalid(monitor, reason) {
   const name = monitor.name || monitor.url;
   const message = '"' + name + '" 监控失效：' + reason + '\n请检查网址是否有效，或重新拾取元素';
-  const event = buildNotificationEvent(monitor, 'invalid', message, { reason: reason, sequence: monitor.eventSeq });
+  // 去重键绝不能包含 reason 和正文：reason 是 fetch 抛出的本机网络错误原文
+  // （断网 'Failed to fetch'、DNS 'net::ERR_NAME_NOT_RESOLVED'、反代 'HTTP 502'、
+  // 超时被翻成 '请求超时'），markCheckFailure 还会往里拼"连续失败 N 次"。
+  // 同一场故障，两台设备拿到的 reason 文本必然不同，算出的 eventKey 也不同 ——
+  // deliveredEvents 里查不到对方的标记，仲裁认不出对手，于是每台设备各发一条。
+  //
+  // 失效是一次状态迁移，markCheckFailure 每次迁移只把 eventSeq +1，
+  // 用它当身份即可：同一场故障两台设备的序号相同；用户修好后再次失效序号又不同，
+  // 仍然能再次提醒。正文照旧保留原始错误，便于排查。
+  const event = buildNotificationEvent(monitor, 'invalid', message, {
+    sequence: monitor.eventSeq,
+    stableMessage: '"' + name + '" 监控失效'
+  });
   return notifyOnce(event, {
     name: name, url: monitor.url, message: message, kind: 'invalid'
   }, 'notif-invalid-' + monitor.id, '333 Watcher · 监控失效');
@@ -1858,7 +1873,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.44)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.45)');
 
 
 

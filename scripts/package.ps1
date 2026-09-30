@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$version = '0.6.44'
+$version = '0.6.45'
 $root = Split-Path -Parent $PSScriptRoot
 $zip = Join-Path (Split-Path -Parent $root) "333-watcher-$version.zip"
 $files = @(
