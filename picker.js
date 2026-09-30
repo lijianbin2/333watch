@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - 元素选择器 Content Script v0.6.48
+ * 333 Watcher - 元素选择器 Content Script v0.6.49
  * 修复：微信文档等 Vue 页面选不到的问题
  */
 (function () {
@@ -254,7 +254,11 @@
     };
     dbg('picked', pickResult);
     stopPickMode();
-    try { chrome.storage.sync.set({ pendingPick: pickResult }).then(function(){ showDialog(); }).catch(function(){ showDialog(); }); } catch(err){ showDialog(); }
+    // pendingPick 存本机而不是 sync：它是一次性的弹窗交接状态，
+    // 里面装的是当前页面的 URL / 标题 / 文本 / href。放进 sync 的话，
+    // 这份页面内容会被上传到 Google 账号，而且下次在**另一台设备**上
+    // 打开弹窗也会被自动回填 —— 跨设备的陈旧选择，纯属意外。
+    try { chrome.storage.local.set({ pendingPick: pickResult }).then(function(){ showDialog(); }).catch(function(){ showDialog(); }); } catch(err){ showDialog(); }
   }
 
   function onKey(e){ if (e.key === 'Escape' || e.key === 'Esc') cleanup(); }
@@ -329,7 +333,7 @@
       if(dialogHost) dialogHost.remove(); dialogHost=null;
       // 重新选择意味着放弃这次结果：清掉 pendingPick，否则下次打开 popup 会自动
       // 回填一个用户已经放弃的陈旧选择。
-      try{ chrome.storage.sync.remove('pendingPick'); }catch(e){}
+      try{ chrome.storage.local.remove('pendingPick'); }catch(e){}
       pickResult=null;
       startPickMode(); if(badge) badge.style.display='block';
     });
@@ -342,7 +346,7 @@
     var attribute = checked ? checked.value : 'text';
     saveBtn.disabled=true; msgEl.textContent=''; msgEl.classList.remove('error');
     chrome.runtime.sendMessage({type:'save-element-monitor', pick: pickResult, attribute: attribute}).then(function(res){
-      if(res && res.ok){ try{ chrome.storage.sync.remove('pendingPick'); }catch(e){} showToast(res.mode==='updated' ? '已更新监控' : '已添加监控'); cleanup(); }
+      if(res && res.ok){ try{ chrome.storage.local.remove('pendingPick'); }catch(e){} showToast(res.mode==='updated' ? '已更新监控' : '已添加监控'); cleanup(); }
       else { msgEl.textContent=(res&&res.error)||'保存失败，请重试'; msgEl.classList.add('error'); saveBtn.disabled=false; }
     }).catch(function(err){ console.error('[333 Watcher] save picked failed',err); msgEl.textContent='保存失败：'+(err.message||'未知错误'); msgEl.classList.add('error'); saveBtn.disabled=false; });
   }
@@ -371,6 +375,12 @@
     // 同一页面反复注入选择器时，content script 上下文是复用的：
     // 不摘掉监听器会每次注入都多留一个，指向已被清理的旧闭包。
     try{ chrome.runtime.onMessage.removeListener(onRuntimeMessage); }catch(e){}
+    // 放弃这次点选必须清掉 pendingPick。cleanup() 的三个入口里，
+    // 两个是放弃（Escape、弹窗发来的 w333-close-dialog），一个是保存成功后的收尾，
+    // 所以在这里清是安全的。漏掉前两个的后果：这份页面内容（URL/标题/文本）
+    // 会一直留在存储里，之后每次打开扩展弹窗都被自动回填成陈旧选择，
+    // 重启浏览器、甚至换一台设备都还在。
+    try{ chrome.storage.local.remove('pendingPick'); }catch(e){}
   }
   chrome.runtime.onMessage.addListener(onRuntimeMessage);
 

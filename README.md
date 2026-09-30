@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.48**
+当前版本：**v0.6.49**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -256,7 +256,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.48"
+$version = "0.6.49"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -277,6 +277,70 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.49
+
+- 修复安装 / 启动链路里的未捕获 rejection，以及"一步失败、整条链停摆"。
+  - `chrome.runtime.onInstalled` 与 `chrome.runtime.onStartup` 里是
+    `migrateData` → `migrateHistoryToSync` → `syncAlarms` → `ensurePruneAlarm`
+    的串行链，任何一步 reject（同步配额耗尽、迁移锁超时、alarms 不可用）
+    都会让后面几步被静默跳过 —— 最典型的后果是**监控再也不会被排上定时器**，
+    表现为"装好之后不检查了"，但扩展里一条错误提示都没有。
+  - 同样地，`catchUpChecks()` 开头的 `getMonitors()` 失败会让整轮开机补检直接抛出；
+    `chrome.alarms.onAlarm` 虽然给 `checkMonitor` 加了兜底，但开头的
+    `getMonitors()` 仍是裸 `await` —— 而这恰恰是触发最频繁的监听器
+    （每个监控一条周期 alarm），同步存储读失败时抛出的 rejection 既没有监控 id
+    也没有失败原因；`chrome.notifications.onClicked` 里也还有一处裸的 await 链。
+  - 现在这四处的每一步都走统一的 `runLifecycleStep(label, fn)` 隔离：
+    失败只打一条带上下文的 `console.error`，**不中断后续步骤**；
+    `catchUpChecks()` 读不到列表时安静放弃本轮（下面的逐个隔离本来就救不了这种情况）。
+- 回归测试：测试脚手架把 `onInstalled` / `onStartup` 的监听器从 `onMessage` 里
+  拆成独立分桶，才能单独派发生命周期事件并注入失败。断言不只是"没报错"，
+  而是**失败的 `syncAlarms` 之后的 `ensurePruneAlarm` 仍然被执行**（`createdAlarms`
+  里必须出现 `333-prune-history`），否则逐步隔离被换成单个外层 try/catch 也会蒙混过关。
+  周期 alarm 的用例同样覆盖了"监控前缀 alarm"和"非前缀直接早退"两条路径。
+
+- 修复**同步存储瞬时抖动导致跨设备去重账本被整体抹掉**（重复提醒的根因之一，
+  且不可自愈）。
+  - `deliveredEvents` 是记录"哪些 `eventKey` 已经投递过"的跨设备去重账本，
+    按设计是整键读-改-写。
+  - 旧实现里 `getDeliveredEvents()` 用 `catch { return {} }` 把**读失败**吞成
+    "账本是空的"，而 `markEventDelivered()` 紧接着把这个空 map 展开、
+    加上自己的标记、**整键写回**。
+  - 于是一次同步存储的瞬时抖动（离线、配额紧张、扩展正在卸载）就会把
+    所有其他事件 —— 也就是其他所有监控、其他所有设备 —— 的已投递标记一次性清空。
+    之后每一场变化在每台设备上都重新变成"从未提醒过"，于是出现
+    "明明 A 电脑读过了，换到 B 电脑又收到一遍"的重复提醒，而且不会自行恢复。
+  - 现在拆成 `readDeliveredEvents()`（读失败返回 `null`，与"确实是空的" `{}` 区分）
+    和 `getDeliveredEvents()`（只读查询用，读不出来按"没投递过"处理）。
+    `markEventDelivered()` 只在**确实读到账本**时才整键写回，读失败就跳过这次写入 ——
+    少一层保险，但不影响本次通知的投递。账本形状异常（被写坏、旧版本残留）
+    同样按读失败处理，不会被静默替换成一个只剩一条的空账本。
+  - 反向验证：旧代码跑新测试，3 条标记的账本在一次读失败后只剩 1 条，
+    正是上面描述的抹除行为。
+
+- 修复**元素点选的临时数据被写进跨设备同步存储**，以及**放弃点选后残留不清**。
+  - `pendingPick` 是"选择器 → 弹窗"的一次性交接状态，内容是当前页面的
+    `pageUrl` / `pageTitle` / `text` / `href` / `src`，即**真实页面内容**。
+  - 它原先写在 `chrome.storage.sync` 里，带来三个问题：
+    1. 这份页面内容被上传到用户的 Google 账号 —— 而扩展根本不需要跨设备传它；
+    2. 在**另一台设备**打开弹窗，会被自动回填成一次莫名其妙的元素选择
+       （填入别的设备的 URL、标题和正文）；
+    3. 每次点选白占 2 次 `storage.sync` 写配额（上限 1800 次/小时），
+       而这些是一次性 UI 状态。
+  - 更严重的是 `cleanup()` 从不清 `pendingPick`。`cleanup()` 是放弃点选
+    （**按 Esc**、弹窗发来的 `w333-close-dialog`）的唯一出口，旧实现在这里
+    只摘 DOM、不清存储。于是「选中元素 → 按 Esc」之后，这份页面内容就**永久**
+    留在存储里，之后每次打开弹窗都被自动回填成陈旧选择，
+    重启浏览器、甚至换一台设备都还在。
+    （源码里本来就有注释意识到"下次打开 popup 会自动回填一个用户已经放弃的陈旧选择"，
+    但只处理了「重新选择」按钮，漏了 Esc 和页面跳走。）
+  - 现在 `pendingPick` 全程改用 `chrome.storage.local`，并在 `cleanup()` 里清除。
+    `PRIVACY.md` 同步更新为"只存本机、不上传、不同步"。
+  - 回归测试：静态扫描断言 `picker.js` 中不存在任何
+    `storage.sync` + `pendingPick` 的组合（覆盖全部读写点），再断言
+    `cleanup()` 确实调用了 `storage.local.remove('pendingPick')`。
+    两条断言分别做过反向验证。
 
 ### v0.6.48
 

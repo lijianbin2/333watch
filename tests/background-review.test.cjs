@@ -5,7 +5,9 @@ const vm = require('node:vm');
 
 const backgroundPath = path.join(__dirname, '..', 'background.js');
 const source = fs.readFileSync(backgroundPath, 'utf8');
-const listeners = { runtime: [], notifications: [], storage: [], alarms: [] };
+// runtime 事件按来源分桶：onMessage 只取 runtime[0]，生命周期监听器
+// 需要能单独派发，否则无法针对安装/启动流程做失败注入。
+const listeners = { runtime: [], notifications: [], storage: [], alarms: [], installed: [], startup: [] };
 const syncStore = new Map();
 const localStore = new Map();
 let notificationCount = 0;
@@ -65,8 +67,8 @@ const chrome = {
   runtime: {
     lastError: null,
     onMessage: { addListener: (fn) => listeners.runtime.push(fn) },
-    onInstalled: { addListener: (fn) => listeners.runtime.push(fn) },
-    onStartup: { addListener: (fn) => listeners.runtime.push(fn) },
+    onInstalled: { addListener: (fn) => listeners.installed.push(fn) },
+    onStartup: { addListener: (fn) => listeners.startup.push(fn) },
     sendMessage: async () => ({ ok: false }),
   },
   offscreen: {
@@ -1590,6 +1592,138 @@ async function test() {
   );
   chrome.action.setBadgeText = realSetBadgeText;
   process.off('unhandledRejection', onUnhandled);
+
+  // ---------------- 安装/启动监听器必须逐步兜底 ----------------
+  // onInstalled / onStartup 里是 migrateData → migrateHistoryToSync →
+  // syncAlarms → ensurePruneAlarm 的串行链。旧实现整条链裸挂在监听器上：
+  // 中间一步 reject（同步配额、迁移锁超时）既会逃出未捕获 rejection，
+  // 又会把后面的定时器同步和清理 alarm 一起吞掉，监控从此不再被检查。
+  const lifecycleUnhandled = [];
+  const onLifecycleUnhandled = (reason) => lifecycleUnhandled.push(reason);
+  process.on('unhandledRejection', onLifecycleUnhandled);
+  const realAlarmsGetAll = chrome.alarms.getAll;
+  const createdAlarms = [];
+  const realAlarmsCreate = chrome.alarms.create;
+  chrome.alarms.create = (name, info) => { createdAlarms.push(name); return realAlarmsCreate(name, info); };
+  const realSyncGetForLifecycle = chrome.storage.sync.get;
+  // 让 syncAlarms（链中第二步）失败，同时让 migrateData 有数据可处理。
+  chrome.storage.sync.get = async (key) => {
+    if (key === null || key === undefined) return realSyncGetForLifecycle(key);
+    throw new Error('sync storage unavailable during install');
+  };
+  chrome.alarms.getAll = async () => { throw new Error('alarms unavailable during install'); };
+
+  for (const fn of listeners.installed) await fn({ reason: 'install' });
+  for (const fn of listeners.startup) await fn();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(
+    lifecycleUnhandled.length,
+    0,
+    'install/startup listeners must not let a failing migration or alarm step escape: ' +
+      lifecycleUnhandled.map(String).join(' | ')
+  );
+  // 关键断言不是"没报错"，而是"失败之后的步骤仍然执行了"：
+  // ensurePruneAlarm 必须被排上，说明 ensurePruneAlarm 仍被调用过。
+  assert.ok(
+    createdAlarms.includes('333-prune-history'),
+    'a failing syncAlarms must not skip the following ensurePruneAlarm step: ' +
+      JSON.stringify(createdAlarms)
+  );
+
+  chrome.storage.sync.get = realSyncGetForLifecycle;
+  chrome.alarms.getAll = realAlarmsGetAll;
+  chrome.alarms.create = realAlarmsCreate;
+  process.off('unhandledRejection', onLifecycleUnhandled);
+
+  // 启动补检读不到监控列表时必须安静放弃，而不是抛一条无上下文的 rejection。
+  const catchUpUnhandled = [];
+  const onCatchUpUnhandled = (reason) => catchUpUnhandled.push(reason);
+  process.on('unhandledRejection', onCatchUpUnhandled);
+  const realSyncGetForCatchUp = chrome.storage.sync.get;
+  chrome.storage.sync.get = async (key) => {
+    if (key === null || key === undefined) return realSyncGetForCatchUp(key);
+    throw new Error('sync storage unavailable during startup');
+  };
+  for (const fn of listeners.startup) await fn();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    catchUpUnhandled.length,
+    0,
+    'catch-up checks must not escape as an unhandled rejection when the monitor list is unreadable: ' +
+      catchUpUnhandled.map(String).join(' | ')
+  );
+  chrome.storage.sync.get = realSyncGetForCatchUp;
+  process.off('unhandledRejection', onCatchUpUnhandled);
+
+  // ---------------- 周期 alarm 读不到监控列表时必须安静放弃 ----------------
+  // onAlarm 是触发最频繁的监听器（每个监控一条周期 alarm）。旧实现里
+  // checkMonitor 有兜底，但开头的 getMonitors() 是裸 await：同步存储读失败
+  // 时抛出的 rejection 逃出监听器，既没有监控 id 也没有失败原因。
+  const alarmUnhandled = [];
+  const onAlarmUnhandled = (reason) => alarmUnhandled.push(reason);
+  process.on('unhandledRejection', onAlarmUnhandled);
+  const realSyncGetForAlarm = chrome.storage.sync.get;
+  chrome.storage.sync.get = async (key) => {
+    if (key === null || key === undefined) return realSyncGetForAlarm(key);
+    throw new Error('sync storage unavailable during alarm');
+  };
+  for (const fn of listeners.alarms) {
+    await fn({ name: 'monitor-quota-gone' });
+    // 非监控前缀的 alarm 直接早退，同样不许炸。
+    await fn({ name: 'other-alarm' });
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    alarmUnhandled.length,
+    0,
+    'the alarm listener must not let a failing monitor list read escape as an unhandled rejection: ' +
+      alarmUnhandled.map(String).join(' | ')
+  );
+  chrome.storage.sync.get = realSyncGetForAlarm;
+  process.off('unhandledRejection', onAlarmUnhandled);
+
+  // ---------------- 读不到去重账本时绝不能覆盖它 ----------------
+  // deliveredEvents 是整键读-改-写。旧实现里 getDeliveredEvents() 把读失败
+  // 吞成空 map，markEventDelivered() 再拿这个空 map 展开后整键写回 ——
+  // 一次同步存储的瞬时抖动就会抹掉所有其他事件（所有监控、所有设备）的
+  // 已投递标记，之后每一场变化在每台设备上都重新变成"从未提醒过"。
+  // 这正是跨设备重复提醒的根因，且不可自愈。
+  const existingLedger = { 'v1-other-a': vNow, 'v1-other-b': vNow, 'v1-other-c': vNow };
+  syncStore.set('deliveredEvents', { ...existingLedger });
+  const realSyncGetForLedger = chrome.storage.sync.get;
+  chrome.storage.sync.get = async (key) => {
+    if (key === 'deliveredEvents') throw new Error('sync storage unavailable during marker write');
+    return realSyncGetForLedger(key);
+  };
+  await context.markEventDelivered('v1-new-event');
+  assert.deepEqual(
+    plain(syncStore.get('deliveredEvents')),
+    plain(existingLedger),
+    'an unreadable delivered ledger must never be overwritten with a map that drops every other marker'
+  );
+
+  // 形状异常（写坏/旧版本残留）同样不能当成空账本覆盖回去。
+  chrome.storage.sync.get = realSyncGetForLedger;
+  syncStore.set('deliveredEvents', 'corrupted-not-an-object');
+  await context.markEventDelivered('v1-after-corruption');
+  assert.equal(
+    syncStore.get('deliveredEvents'),
+    'corrupted-not-an-object',
+    'a corrupted delivered ledger must be left untouched rather than silently replaced'
+  );
+
+  // 读得动时必须正常合并（这条是防止修复过头、把写入整个禁掉的反向断言）。
+  syncStore.set('deliveredEvents', { ...existingLedger });
+  await context.markEventDelivered('v1-new-event');
+  const mergedLedger = plain(syncStore.get('deliveredEvents'));
+  assert.deepEqual(
+    Object.keys(mergedLedger).sort(),
+    ['v1-new-event', 'v1-other-a', 'v1-other-b', 'v1-other-c'],
+    'a readable delivered ledger must still be merged with, not replaced by, the new marker'
+  );
+  syncStore.delete('deliveredEvents');
 
   stopClock();
   console.log('background-review tests passed');

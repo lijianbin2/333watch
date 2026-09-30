@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.48 - 监控增删改与导入)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.49 - 监控增删改与导入)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -55,6 +55,9 @@ const historyArrow = document.getElementById('history-arrow');
 const bulkIntervalBtn = document.getElementById('bulk-interval-btn');
 
 const hasChromeStorage = typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync;
+// pendingPick 是本机一次性交接状态，不参与同步（见 picker.js 里的说明），
+// 所以单独判断 local，别让它跟着 sync 的探测结果走。
+const hasLocalStorage = typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local;
 const hasTabsApi = typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query;
 const hasScripting = typeof chrome !== 'undefined' && chrome.scripting && chrome.scripting.executeScript;
 const DEFAULT_INTERVAL = 500;
@@ -613,15 +616,15 @@ function hidePickedInfo() {
 async function clearPendingPick() {
   pickedElement = null;
   hidePickedInfo();
-  if (hasChromeStorage) {
-    try { await chrome.storage.sync.remove('pendingPick'); } catch {}
+  if (hasLocalStorage) {
+    try { await chrome.storage.local.remove('pendingPick'); } catch {}
   }
 }
 
 async function loadPendingPick() {
-  if (!hasChromeStorage || editingId !== null) return false;
+  if (!hasLocalStorage || editingId !== null) return false;
   try {
-    const { pendingPick } = await chrome.storage.sync.get('pendingPick');
+    const { pendingPick } = await chrome.storage.local.get('pendingPick');
     if (!pendingPick || !pendingPick.selector) return false;
     pickedElement = pendingPick;
     inputType.value = 'element';

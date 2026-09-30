@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.48 - 角标刷新错误不再逃逸)
+ * 333 Watcher - Background Service Worker (v0.6.49 - 安装/启动链路逐步兜底)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -1297,14 +1297,37 @@ function deliveredRivalClaimsOf(event, history, claimId) {
   ));
 }
 
-async function getDeliveredEvents() {
+/**
+ * 读取去重账本。
+ *
+ * 刻意区分"读失败"(null) 和"确实是空的"({})：这个键是整键读-改-写，
+ * 读失败时若返回一个空 map，调用方会拿它覆盖整份账本，把所有其他监控
+ * （以及其他设备）的已投递标记一次性抹掉 —— 于是同一场变化在所有设备上
+ * 重新变成"从未提醒过"，正是跨设备重复提醒的根因。
+ */
+async function readDeliveredEvents() {
   try {
     const data = await chrome.storage.sync.get(DELIVERED_KEY);
     const raw = data && data[DELIVERED_KEY];
-    return (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+    // 键不存在 = 还没投递过任何事件，是合法的空账本。
+    if (raw == null) return {};
+    // 形状异常（被写坏、旧版本残留）同样不能当成空账本覆盖回去。
+    if (typeof raw !== 'object' || Array.isArray(raw)) {
+      console.error('[333 Watcher] deliveredEvents has unexpected shape, treating read as failed');
+      return null;
+    }
+    return raw;
   } catch (err) {
-    return {};
+    console.error('[333 Watcher] deliveredEvents read failed:', err && err.message);
+    return null;
   }
+}
+
+// 只读查询用：读不出来时按"没有投递过"处理，最坏是多发一次通知，
+// 但绝不能因此覆盖别人的账本。
+async function getDeliveredEvents() {
+  const map = await readDeliveredEvents();
+  return map || {};
 }
 
 /**
@@ -1333,12 +1356,20 @@ async function isEventDelivered(eventKey) {
  *
  * 独立键只有赢家写，输家的撤回碰不到它，标记因此不会被回滚。
  * 写前重读并合并，是为了缩小两台设备"同时完成不同事件"时互相覆盖的窗口。
+ * 读失败时必须放弃本次写入：整键写-改-下，拿一个空 map 回去会把
+ * 其他所有事件的标记清空，跨设备去重就此失效（表现为所有设备同时重新
+ * 收到一遍已经提醒过的内容）。放弃写入只是少一层保险，不影响本次通知。
  */
 async function markEventDelivered(eventKey) {
   if (!eventKey) return;
   await withHistoryLock(async () => {
     try {
-      const map = { ...(await getDeliveredEvents()) };
+      const current = await readDeliveredEvents();
+      if (!current) {
+        dbg('[333 Watcher] delivered marker write skipped: ledger unreadable');
+        return;
+      }
+      const map = { ...current };
       map[eventKey] = Date.now();
       const cutoff = Date.now() - HISTORY_READ_RETENTION_MS;
       const kept = Object.entries(map)
@@ -1536,21 +1567,39 @@ async function markCheckFailure(monitorId, checkedAt, reason, kind) {
   }
   return kind === 'not-found' ? 'not-found' : 'error';
 }
+
+// 事件监听器里的未捕获 rejection 只会变成一条无上下文的日志：
+// 安装/启动流程静默中断、监控没排上定时器，用户却看不出是哪一步失败。
+// 统一收敛到一处，方便测试断言。
+async function runLifecycleStep(label, fn) {
+  try {
+    await fn();
+  } catch (err) {
+    console.error('[333 Watcher] ' + label + ' failed:', err && err.message);
+  }
+}
+
 chrome.notifications.onClicked.addListener(async (notifId) => {
-  if (!notifId.startsWith('notif-')) return;
-  if (notifId.startsWith('notif-picked-') || notifId.startsWith('notif-test-')) {
+  // 监听器里的未捕获 rejection 只会变成一条无上下文的日志：
+  // 用户点开提醒后页面不跳转、通知也不消失，却看不出是哪一步失败。
+  try {
+    if (!notifId.startsWith('notif-')) return;
+    if (notifId.startsWith('notif-picked-') || notifId.startsWith('notif-test-')) {
+      chrome.notifications.clear(notifId);
+      return;
+    }
+    let monitorId = notifId.slice('notif-'.length);
+    if (monitorId.startsWith('invalid-')) monitorId = monitorId.slice('invalid-'.length);
+    if (monitorId.startsWith('recovered-')) monitorId = monitorId.slice('recovered-'.length);
+    const monitors = await getMonitors();
+    const monitor = monitors.find((m) => m.id === monitorId);
+    if (monitor && !monitor.url.startsWith(TEST_URL_PREFIX)) {
+      chrome.tabs.create({ url: monitor.url });
+    }
     chrome.notifications.clear(notifId);
-    return;
+  } catch (err) {
+    console.error('[333 Watcher] notification click failed:', notifId, err && err.message);
   }
-  let monitorId = notifId.slice('notif-'.length);
-  if (monitorId.startsWith('invalid-')) monitorId = monitorId.slice('invalid-'.length);
-  if (monitorId.startsWith('recovered-')) monitorId = monitorId.slice('recovered-'.length);
-  const monitors = await getMonitors();
-  const monitor = monitors.find((m) => m.id === monitorId);
-  if (monitor && !monitor.url.startsWith(TEST_URL_PREFIX)) {
-    chrome.tabs.create({ url: monitor.url });
-  }
-  chrome.notifications.clear(notifId);
 });
 
 // ---------------- 消息处理 ----------------
@@ -1846,22 +1895,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // ---------------- 事件入口 ----------------
 chrome.runtime.onInstalled.addListener(async (details) => {
   dbg('[333 Watcher] installed:', details.reason);
-  const data = await chrome.storage.sync.get('monitors');
-  if (!Array.isArray(data.monitors)) {
-    await chrome.storage.sync.set({ monitors: [] });
-  }
-  await migrateData();
-  await migrateHistoryToSync();
-  await syncAlarms();
-  await ensurePruneAlarm();
+  // 每步独立隔离：前一步失败（存储配额、迁移锁超时）不得让后面的
+  // 定时器同步和清理 alarm 被静默跳过。
+  await runLifecycleStep('onInstalled init monitors', async () => {
+    const data = await chrome.storage.sync.get('monitors');
+    if (!Array.isArray(data.monitors)) {
+      await chrome.storage.sync.set({ monitors: [] });
+    }
+  });
+  await runLifecycleStep('onInstalled migrateData', migrateData);
+  await runLifecycleStep('onInstalled migrateHistoryToSync', migrateHistoryToSync);
+  await runLifecycleStep('onInstalled syncAlarms', syncAlarms);
+  await runLifecycleStep('onInstalled ensurePruneAlarm', ensurePruneAlarm);
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   dbg('[333 Watcher] startup');
-  await migrateData();
-  await migrateHistoryToSync();
-  await syncAlarms();
-  await ensurePruneAlarm();
+  await runLifecycleStep('onStartup migrateData', migrateData);
+  await runLifecycleStep('onStartup migrateHistoryToSync', migrateHistoryToSync);
+  await runLifecycleStep('onStartup syncAlarms', syncAlarms);
+  await runLifecycleStep('onStartup ensurePruneAlarm', ensurePruneAlarm);
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -1873,7 +1926,15 @@ chrome.storage.onChanged.addListener((changes, area) => {
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (!alarm.name.startsWith(ALARM_PREFIX)) return;
   const monitorId = alarm.name.slice(ALARM_PREFIX.length);
-  const monitors = await getMonitors();
+  // 读监控列表同样要兜底：这是触发最频繁的监听器（每个监控一条周期 alarm），
+  // 同步存储读失败（配额、离线）时裸 await 会抛出一条无上下文的 rejection。
+  let monitors;
+  try {
+    monitors = await getMonitors();
+  } catch (err) {
+    console.error('[333 Watcher] alarm monitor list read failed:', monitorId, err && err.message);
+    return;
+  }
   const monitor = monitors.find((m) => m.id === monitorId);
   if (monitor) {
     try {
@@ -1885,7 +1946,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.48)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.49)');
 
 
 
@@ -2062,7 +2123,15 @@ setTimeout(() => { try { ensurePruneAlarm(); } catch {} }, 1000);
 // ================= 启动补检 =================
 // Chrome 启动时：超过 nextCheckTime 的任务立即检查（关机期间不重置计时）
 async function catchUpChecks() {
-  const monitors = await getMonitors();
+      // 读监控列表失败时直接放弃本轮补检（下面的逐个隔离也救不了）：
+      // 监听器本身必须兜底，否则是一条无上下文的 rejection。
+      let monitors;
+      try {
+        monitors = await getMonitors();
+      } catch (err) {
+        console.error('[333 Watcher] catch-up check list read failed:', err && err.message);
+        return;
+      }
   const now = Date.now();
   for (const m of monitors) {
     const next = Number(m.nextCheckTime) || 0;
@@ -2081,7 +2150,7 @@ async function catchUpChecks() {
 }
 
 chrome.runtime.onStartup.addListener(async () => {
-  await catchUpChecks();
+      await runLifecycleStep('onStartup catchUpChecks', catchUpChecks);
 });
 
 

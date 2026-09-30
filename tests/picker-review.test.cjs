@@ -67,6 +67,28 @@ function loadPicker() {
     clearTimeout() {},
   };
 
+  // 记录 storage 的每一次调用，用来断言 pendingPick 的落点与清除时机。
+  const storageCalls = [];
+  const localStore = new Map();
+  const record = (area, op, payload) => storageCalls.push({ area, op, payload });
+  const makeArea = (area) => ({
+    set: async (values) => {
+      record(area, 'set', Object.keys(values || {}));
+      if (area === 'local') Object.entries(values || {}).forEach(([k, v]) => localStore.set(k, v));
+    },
+    get: async (key) => {
+      record(area, 'get', typeof key === 'string' ? key : key);
+      if (area === 'local' && typeof key === 'string' && localStore.has(key)) {
+        return { [key]: localStore.get(key) };
+      }
+      return {};
+    },
+    remove: async (key) => {
+      record(area, 'remove', key);
+      for (const k of Array.isArray(key) ? key : [key]) localStore.delete(k);
+    },
+  });
+
   const context = {
     console,
     document: doc,
@@ -79,7 +101,10 @@ function loadPicker() {
     getComputedStyle: win.getComputedStyle,
     URL,
     CSS: { escape: (v) => String(v).replace(/[^a-zA-Z0-9_-]/g, (ch) => '\\' + ch) },
-    chrome: { runtime: { onMessage: { addListener() {}, removeListener() {} }, sendMessage: () => Promise.resolve({}) } },
+    chrome: {
+      runtime: { onMessage: { addListener() {}, removeListener() {} }, sendMessage: () => Promise.resolve({}) },
+      storage: { local: makeArea('local'), sync: makeArea('sync') },
+    },
   };
   context.globalThis = context;
   vm.createContext(context);
@@ -92,7 +117,13 @@ function loadPicker() {
   vm.runInContext(patched, context);
   assert.equal(typeof win.__getSelector, 'function', 'getSelector must be reachable from the test');
   assert.equal(typeof win.__callCleanup, 'function', 'cleanup must be reachable from the test');
-  return { getSelector: win.__getSelector, cleanup: win.__callCleanup, win: win };
+  return {
+    getSelector: win.__getSelector,
+    cleanup: win.__callCleanup,
+    win: win,
+    storageCalls,
+    localStore,
+  };
 }
 
 function anchor(href) {
@@ -202,5 +233,46 @@ assert.equal(
   'cleanup must release the debug handle so repeated injections do not pile up DOM references'
 );
 assert.equal(loaded.win.__w333PickerActive, false, 'cleanup must clear the active flag');
+
+// ---------------- pendingPick 必须留在本机，且放弃时要清掉 ----------------
+// pendingPick 里装的是当前页面的 URL / 标题 / 文本 / href。
+// 它是一次性的弹窗交接状态，却被写进了跨设备同步的 chrome.storage.sync：
+//   1. 这份页面内容会被上传到用户的 Google 账号，而扩展根本不需要跨设备传它；
+//   2. 下次在**另一台设备**打开弹窗，也会被自动回填成一次莫名其妙的元素选择。
+// 静态扫描覆盖全部读写点，比逐个调用路径断言更不容易漏。
+const pendingPickSyncHits = source
+  .split('\n')
+  .map((line, i) => ({ n: i + 1, line }))
+  .filter((x) => /storage\.sync/.test(x.line) && /pendingPick/.test(x.line));
+assert.equal(
+  pendingPickSyncHits.length,
+  0,
+  'pendingPick holds real page content and must never be stored in cross-device sync storage, found:\n' +
+    pendingPickSyncHits.map((x) => x.n + ': ' + x.line.trim()).join('\n')
+);
+
+// cleanup() 是放弃点选（Escape、弹窗发来的 w333-close-dialog）的唯一出口，
+// 也是保存成功后的收尾。旧实现在这里不清 pendingPick，于是：
+// 选中元素 → 按 Esc → 这份页面内容永远留在存储里，之后每次打开弹窗都被回填，
+// 重启浏览器、甚至换一台设备都还在。
+const cleanupProbe = loadPicker();
+cleanupProbe.localStore.set('pendingPick', {
+  selector: '#ver',
+  pageUrl: 'https://dl.test/page',
+  text: '3.9.1',
+});
+cleanupProbe.cleanup();
+assert.ok(
+  cleanupProbe.storageCalls.some(
+    (c) => c.area === 'local' && c.op === 'remove' && c.payload === 'pendingPick'
+  ),
+  'cleanup must clear the abandoned pendingPick, otherwise it auto-fills the form forever. calls: ' +
+    JSON.stringify(cleanupProbe.storageCalls)
+);
+assert.equal(
+  cleanupProbe.localStore.has('pendingPick'),
+  false,
+  'the abandoned pendingPick must actually be gone from storage after cleanup'
+);
 
 console.log('picker-review tests passed');
