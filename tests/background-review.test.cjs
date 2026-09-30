@@ -8,6 +8,8 @@ const source = fs.readFileSync(backgroundPath, 'utf8');
 const listeners = { runtime: [], notifications: [], storage: [], alarms: [] };
 const syncStore = new Map();
 let notificationCount = 0;
+// 结构化克隆：真实 chrome.storage 读出的是副本，读写不共享引用。
+const clone = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
 
 const chrome = {
   runtime: {
@@ -25,11 +27,13 @@ const chrome = {
   storage: {
     sync: {
       get: async (key) => {
-        if (key == null) return Object.fromEntries(syncStore);
-        if (Array.isArray(key)) return Object.fromEntries(key.filter((k) => syncStore.has(k)).map((k) => [k, syncStore.get(k)]));
-        return syncStore.has(key) ? { [key]: syncStore.get(key) } : {};
+        if (key == null) return Object.fromEntries([...syncStore].map(([k, v]) => [k, clone(v)]));
+        if (Array.isArray(key)) {
+          return Object.fromEntries(key.filter((k) => syncStore.has(k)).map((k) => [k, clone(syncStore.get(k))]));
+        }
+        return syncStore.has(key) ? { [key]: clone(syncStore.get(key)) } : {};
       },
-      set: async (values) => Object.entries(values).forEach(([key, value]) => syncStore.set(key, value)),
+      set: async (values) => Object.entries(values).forEach(([key, value]) => syncStore.set(key, clone(value))),
       remove: async (key) => {
         for (const name of Array.isArray(key) ? key : [key]) syncStore.delete(name);
       },
@@ -418,6 +422,59 @@ async function test() {
   assert.equal(freshResult, 'changed', 'a real change must still notify');
   assert.equal(notificationCount, 1, 'a real change must send exactly one notification');
   assert.equal(syncStore.get('monitors')[0].eventSeq, 8, 'a real change must consume an event sequence');
+
+  // 同步存储写失败时：返回 error，并且绝不能发通知（基线没落盘，通知无法追溯）。
+  syncStore.clear();
+  notificationCount = 0;
+  const quotaHtml = '<html><body>F</body></html>';
+  context.__setFetch(async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => String(quotaHtml.length) },
+    body: null,
+    text: async () => quotaHtml,
+  }));
+  const quotaMonitor = {
+    id: 'page-quota',
+    name: 'quota',
+    url: 'https://example.test/quota',
+    type: 'page',
+    interval: 5,
+    lastHash: null,
+    baselined: true,
+    eventSeq: 2,
+  };
+  const quotaBase = await context.checkPage(quotaMonitor, quotaHtml);
+  quotaMonitor.lastHash = quotaBase.update.lastHash;
+  syncStore.set('monitors', [{ ...quotaMonitor }]);
+  context.__setFetch(async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => String((quotaHtml + '!').length) },
+    body: null,
+    text: async () => quotaHtml + '!',
+  }));
+  const realSet = chrome.storage.sync.set;
+  chrome.storage.sync.set = async () => { throw new Error('QUOTA_BYTES quota exceeded'); };
+  let quotaResult;
+  try {
+    quotaResult = await context.checkMonitor(quotaMonitor);
+  } finally {
+    chrome.storage.sync.set = realSet;
+  }
+  assert.equal(quotaResult, 'error', 'a failed baseline write must report an error');
+  assert.equal(notificationCount, 0, 'a failed baseline write must not notify');
+  assert.equal(
+    syncStore.get('monitors')[0].eventSeq,
+    2,
+    'a failed baseline write must not consume an event sequence'
+  );
+  assert.equal(
+    await context.checkMonitor(quotaMonitor),
+    'changed',
+    'a failed check must release its in-flight lock so the next round retries'
+  );
+  assert.equal(notificationCount, 1, 'the retried round notifies exactly once after storage recovers');
 
   syncStore.clear();
   syncStore.set('monitors', [{

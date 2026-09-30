@@ -693,7 +693,14 @@ async function checkMonitor(monitor) {
         invalidSince: null,
         baselined: true
       };
-      await saveMonitors(list);
+      try {
+        await saveMonitors(list);
+      } catch (err) {
+        // 基线没写进同步存储时绝不能发通知：下一轮会再次判定为变化并重试，
+        // 现在通知只会造成一次无法追溯的误报。
+        console.error('[333 Watcher] test check save failed:', monitor.id, err && err.message);
+        return 'error';
+      }
       if (firstBaseline) {
         dbg('[333 Watcher] first check baselined, notification suppressed:', monitor.id);
         return 'baselined';
@@ -826,7 +833,13 @@ async function checkMonitor(monitor) {
     invalidSince: null,
     baselined: true
   };
-  await saveMonitors(monitors);
+  try {
+    await saveMonitors(monitors);
+  } catch (err) {
+    // 基线未能落盘时不发通知：这一轮的变化会在下个周期重新检测到。
+    console.error('[333 Watcher] check save failed:', monitor.id, err && err.message);
+    return 'error';
+  }
   if (wasInvalid) {
     await notifyRecovered(monitors[idx]);
   }
@@ -1115,7 +1128,10 @@ async function markCheckFailure(monitorId, checkedAt, reason, kind) {
     if (shouldInvalid && !wasInvalid) {
       await notifyInvalid(list[i], reason + '（连续失败 ' + failCount + ' 次）');
     }
-  } catch {}
+  } catch (err) {
+    // 失败计数写不进去时不能假装成功：log 出来，便于在扩展里排查同步配额/离线问题。
+    console.error('[333 Watcher] markCheckFailure failed:', monitorId, err && err.message);
+  }
   return kind === 'not-found' ? 'not-found' : 'error';
 }
 chrome.notifications.onClicked.addListener(async (notifId) => {
