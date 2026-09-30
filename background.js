@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.23 - notification claim deduplication)
+ * 333 Watcher - Background Service Worker (v0.6.24 - baseline supersede guard)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -67,6 +67,47 @@ function nextEventSequence(value) {
 
 function waitMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 事件基线字段：page 监控用 lastHash，其余类型用 lastValue。
+function baselineFieldOf(type) {
+  return type === 'page' ? 'lastHash' : 'lastValue';
+}
+
+function normalizedBaseline(value) {
+  return value == null ? null : String(value);
+}
+
+/**
+ * 被其他设备抢先记录时，丢弃本次抓取结果里的基线字段。
+ *
+ * 存储中的基线至少与我们开始检查时的快照一样新；若直接写入我们抓到的值，
+ * 而这次抓取又恰好更新（另一台设备写入之后页面再次变化），该变化会被静默吞掉。
+ * 保留存储中的基线，下一轮检查仍会正常检测到这次变化，只是晚一个周期。
+ */
+function updateWithoutSupersededBaseline(outcome, storedMonitor) {
+  if (!outcome || !outcome.update) return outcome && outcome.update;
+  const field = outcome.baseField || baselineFieldOf(storedMonitor.type);
+  if (!field || !Object.prototype.hasOwnProperty.call(outcome.update, field)) {
+    return outcome.update;
+  }
+  const kept = { ...outcome.update };
+  delete kept[field];
+  return kept;
+}
+
+/**
+ * 判断本次检测所依据的基线是否已被其他设备（或本机更早的检查）推进。
+ *
+ * 检测用的是检查开始时读到的快照。若在提交前发现存储里的基线已经不是快照中的基线，
+ * 说明同一变化已被别处记录并通知过，此时只同步状态、不再重复通知。
+ */
+function baselineSuperseded(outcome, storedMonitor) {
+  if (!outcome || !outcome.changed) return false;
+  const field = outcome.baseField || baselineFieldOf(storedMonitor.type);
+  const detected = normalizedBaseline(outcome.baseValue);
+  const stored = normalizedBaseline(storedMonitor[field]);
+  return detected !== stored;
 }
 
 function stripHeavy(html) {
@@ -451,7 +492,7 @@ async function checkPage(monitor, html) {
   const oldHash = monitor.lastHash || null;
   const changed = oldHash !== null && newHash !== oldHash;
   dbg('[333 Watcher] [page] oldHash:', oldHash, 'newHash:', newHash, 'changed:', changed);
-  return { changed, prevValue: oldHash, update: { lastHash: newHash } };
+  return { changed, prevValue: oldHash, baseValue: oldHash, baseField: 'lastHash', update: { lastHash: newHash } };
 }
 
 // ---------------- 检测：json (微信开发者工具 config.json 专用) ----------------
@@ -478,7 +519,7 @@ async function checkJson(monitor, text) {
   }
   const last = monitor.lastValue || null;
   const changed = last !== null && cur !== last;
-  return { changed, prevValue: last, update: { lastValue: cur } };
+  return { changed, prevValue: last, baseValue: last, baseField: 'lastValue', update: { lastValue: cur } };
 }
 // ---------------- 检测：link（旧版，兼容保留） ----------------
 async function checkLink(monitor, html) {
@@ -502,7 +543,7 @@ async function checkLink(monitor, html) {
   const lastValue = monitor.lastValue == null ? null : limitMonitorValue(monitor.lastValue, 'href');
   const changed = lastValue !== null && currentHref !== lastValue;
   dbg('[333 Watcher] [link] lastValue:', lastValue, 'currentHref:', currentHref, 'changed:', changed);
-  return { changed, prevValue: lastValue, update: { lastValue: currentHref } };
+  return { changed, prevValue: lastValue, baseValue: lastValue, baseField: 'lastValue', update: { lastValue: currentHref } };
 }
 
 // ---------------- 检测：element ----------------
@@ -535,7 +576,7 @@ async function checkElement(monitor, html) {
   const lastValue = monitor.lastValue == null ? null : limitMonitorValue(monitor.lastValue, attribute);
   // 兼容旧版拾取时截断 120 字符的基线：当前值以旧基线为前缀则视为未变，直接补全基线
   if (lastValue !== null && lastValue.length === 120 && current.startsWith(lastValue)) {
-    return { changed: false, prevValue: lastValue, update: { lastValue: current } };
+    return { changed: false, prevValue: lastValue, baseValue: lastValue, baseField: 'lastValue', update: { lastValue: current } };
   }
   const changed = lastValue !== null && current !== lastValue;
   dbg('[333 Watcher] [element] selector:', monitor.selector);
@@ -543,7 +584,7 @@ async function checkElement(monitor, html) {
   dbg('[333 Watcher] [element] lastValue:', lastValue);
   dbg('[333 Watcher] [element] current:', current);
   dbg('[333 Watcher] [element] changed:', changed);
-  return { changed, prevValue: lastValue, update: { lastValue: current } };
+  return { changed, prevValue: lastValue, baseValue: lastValue, baseField: 'lastValue', update: { lastValue: current } };
 }
 
 // ---------------- 检测主流程 ----------------
@@ -628,10 +669,20 @@ async function checkMonitor(monitor) {
       if (idx === -1) return 'error';
       const nowTs = Date.now();
       const firstBaseline = monitor.baselined === false;
+      const superseded = baselineSuperseded(
+        { changed: changed, baseValue: last, baseField: 'lastValue' },
+        list[idx]
+      );
+      if (superseded) {
+        dbg('[333 Watcher] test change already applied elsewhere, notification suppressed:', monitor.id);
+      }
+      const update = superseded
+        ? updateWithoutSupersededBaseline({ baseField: 'lastValue', update: { lastValue: cur } }, list[idx])
+        : { lastValue: cur };
       list[idx] = {
         ...list[idx],
-        lastValue: cur,
-        eventSeq: changed ? nextEventSequence(list[idx].eventSeq) : (Number(list[idx].eventSeq) || 0),
+        ...update,
+        eventSeq: changed && !superseded ? nextEventSequence(list[idx].eventSeq) : (Number(list[idx].eventSeq) || 0),
         lastCheck: checkedAt,
         lastCheckTime: nowTs,
         nextCheckTime: nowTs + Math.max(1, Number(list[idx].interval) || 1) * 60000,
@@ -647,10 +698,11 @@ async function checkMonitor(monitor) {
         dbg('[333 Watcher] first check baselined, notification suppressed:', monitor.id);
         return 'baselined';
       }
-      if (changed) {
+      if (changed && !superseded) {
         await notifyChange(list[idx], { oldValue: last, newValue: cur });
         return 'changed';
       }
+      if (changed) return 'changed-elsewhere';
       return 'unchanged';
     } finally { _checkLock.delete(monitor.id); }
   }
@@ -750,12 +802,19 @@ async function checkMonitor(monitor) {
   const nowTs = Date.now();
   const wasInvalid = !!monitors[idx].invalid;
   const firstBaseline = monitors[idx].baselined === false;
-  const changeEventSeq = outcome.changed ? nextEventSequence(monitors[idx].eventSeq) : (Number(monitors[idx].eventSeq) || 0);
+  const superseded = baselineSuperseded(outcome, monitors[idx]);
+  if (superseded) {
+    dbg('[333 Watcher] change already recorded by another device, notification suppressed:', monitor.url);
+  }
+  const changeEventSeq = (outcome.changed && !superseded) ? nextEventSequence(monitors[idx].eventSeq) : (Number(monitors[idx].eventSeq) || 0);
   // 恢复事件也消耗一个序号，避免同一监控多次“失效 -> 恢复”被合并。
   const eventSeq = wasInvalid ? nextEventSequence(changeEventSeq) : changeEventSeq;
+  const update = superseded
+    ? updateWithoutSupersededBaseline(outcome, monitors[idx])
+    : outcome.update;
   monitors[idx] = {
     ...monitors[idx],
-    ...outcome.update,
+    ...update,
     eventSeq,
     lastCheck: checkedAt,
     lastCheckTime: nowTs,
@@ -776,6 +835,10 @@ async function checkMonitor(monitor) {
   if (firstBaseline) {
     dbg('[333 Watcher] first check baselined, notification suppressed:', monitor.id);
     return 'baselined';
+  }
+
+  if (outcome.changed && superseded) {
+    return 'changed-elsewhere';
   }
 
   if (outcome.changed) {
@@ -839,16 +902,6 @@ function buildNotificationEvent(monitor, kind, message, details) {
     url: monitor.url,
     message: message
   };
-}
-
-async function hasReadEvent(event) {
-  const history = await getHistory();
-  return history.some(h => {
-    if (!h || h.read !== true) return false;
-    if (event.eventKey && h.eventKey) return h.eventKey === event.eventKey;
-    // v0.6.20 及更早版本没有 eventKey，使用同步历史中的消息进行兼容匹配。
-    return h.url === event.url && h.message === event.message;
-  });
 }
 
 function isActiveClaim(h) {
@@ -1220,7 +1273,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-dbg('[333 Watcher] Background service worker loaded (v0.6.23)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.24)');
 
 
 
@@ -1247,33 +1300,6 @@ async function saveHistory(history) {
     list = list.slice(0, -1);
   }
   await chrome.storage.sync.set({ [HISTORY_KEY]: list });
-}
-
-async function addHistory(record) {
-  try {
-    const history = await getHistory();
-    const now = Date.now();
-    const dedupWindow = 5 * 60 * 1000;
-    const isDup = history.some(h => {
-      if (record.eventKey && h.eventKey) return h.eventKey === record.eventKey;
-      return h.message === record.message && h.url === record.url && Math.abs(now - new Date(h.time).getTime()) < dedupWindow;
-    });
-    if (isDup) { dbg('[333 Watcher] history dedup skipped:', record.message); return; }
-    history.unshift({
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      name: record.name,
-      url: record.url,
-      time: new Date().toISOString(),
-      message: record.message,
-      eventKey: record.eventKey || null,
-      kind: record.kind || 'change',
-      read: false
-    });
-    await saveHistory(history);
-    dbg('[333 Watcher] history added:', record.message);
-  } catch (err) {
-    console.error('[333 Watcher] history add failed:', err);
-  }
 }
 
 // 清理已读通知：超过保留期后自动删除，避免历史无限累积
@@ -1375,7 +1401,8 @@ async function migrateHistoryToSync() {
 
 async function updateBadge() {
   await pruneHistory();
-  const history = await getHistory();
+  // 未完成的跨设备认领尚未确认投递，不计入未读数。
+  const history = (await getHistory()).filter((h) => !h || !h.pending);
   const unread = history.filter((h) => !h.read).length;
   await chrome.action.setBadgeBackgroundColor({ color: '#1f6feb' });
   await chrome.action.setBadgeText({ text: unread > 0 ? String(unread) : '' });

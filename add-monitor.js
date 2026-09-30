@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.23 - notification claim deduplication)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.24 - baseline supersede guard)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -1011,6 +1011,9 @@ async function checkNow(id, btn, feedback) {
     } else if (res.result === 'baselined') {
       showCheckFeedback(feedback, '首次检查：已建立基线（本次不通知）', false);
       renderList();
+    } else if (res.result === 'changed-elsewhere') {
+      showCheckFeedback(feedback, '检测到变化，但已由本机或另一台设备的检查记录，未重复通知', false);
+      renderList();
     } else {
       showCheckFeedback(feedback, '暂无变化', false);
       renderList();
@@ -1284,7 +1287,8 @@ async function handleCreate(attr){
   try{
     const res = await chrome.runtime.sendMessage({ type: 'test-create', attribute: attr });
     if(res && res.ok){
-      showTestStatus((attr==='href')?'"链接"':'"文字"'+(res.mode==='exists')?' 监控已存在 ✓':' 监控已创建 ✓ 1分钟间隔', false);
+      const label = attr === 'href' ? '"链接"' : '"文字"';
+      showTestStatus(label + (res.mode === 'exists' ? ' 监控已存在 ✓' : ' 监控已创建 ✓ 1分钟间隔'), false);
       renderList(); renderUnread(); refreshTestDetails();
     } else showTestStatus('创建失败: '+((res&&res.error)||'未知'), true);
   }catch(e){ showTestStatus('创建失败: '+e.message, true); }
@@ -1313,6 +1317,7 @@ async function handleCheck(attr){
       if(!res || !res.ok) showTestStatus('检查失败: '+((res&&res.error)||'未知'), true);
       else if(res.result==='changed'){ showTestStatus((attr==='href')?'🔗 链接已变化，已发通知 ✓':'📄 文字已变化，已发通知 ✓', false); renderUnread(); renderList(); }
       else if(res.result==='baselined') showTestStatus('首次检查：已建立基线（本次不通知）', false);
+else if(res.result==='changed-elsewhere') showTestStatus('变化已由其他检查记录，未重复通知', false);
       else if(res.result==='unchanged') showTestStatus('暂无变化（需先点“模拟变化”）', true);
       else showTestStatus('结果: '+res.result, res.result==='error');
       refreshTestDetails();

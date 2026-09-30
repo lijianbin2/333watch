@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - 元素选择器 Content Script v0.6.23
+ * 333 Watcher - 元素选择器 Content Script v0.6.24
  * 修复：微信文档等 Vue 页面选不到的问题
  */
 (function () {
@@ -32,7 +32,7 @@
   appendSafe(overlay);
   appendSafe(tip);
   appendSafe(badge);
-  console.log('[333 Watcher] picker overlay injected v0.6.23', overlay, tip, badge, location.href);
+  console.log('[333 Watcher] picker overlay injected v0.6.24', overlay, tip, badge, location.href);
 
   function getSelector(el) {
     if (!el || !el.tagName) return 'body';
@@ -229,7 +229,7 @@
 
   function savePicked(saveBtn, msgEl){
     if(!pickResult) return;
-    var checked = dialogHost && dialogHost.shadowRoot && dialogHost.shadowRoot.querySelector('input[name=\w333-attr\]:checked');
+    var checked = dialogHost && dialogHost.shadowRoot && dialogHost.shadowRoot.querySelector('input[name="w333-attr"]:checked');
     var attribute = checked ? checked.value : 'text';
     saveBtn.disabled=true; msgEl.textContent=''; msgEl.classList.remove('error');
     chrome.runtime.sendMessage({type:'save-element-monitor', pick: pickResult, attribute: attribute}).then(function(res){

@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.23**
+当前版本：**v0.6.24**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -249,7 +249,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.23"
+$version = "0.6.24"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -270,6 +270,15 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.24
+
+- 修复多台设备同时检查时的基线竞争：若检查开始后存储基线已被其他设备推进，本次结果不再重复通知，并保留设备写入的基线，避免吞掉真实变化；
+- 清理无调用的历史记录死代码（`hasReadEvent`、`addHistory`）；
+- 未读角标过滤尚未完成的认领记录，与提醒列表显示保持一致；
+- 修复测试模式下监控状态恒显示“已存在”的三元运算符优先级错误；
+- 元素选择器改用带引号的选择器名称，避免转义歧义；
+- 补充基线抢占、事件序号和端到端去重的测试用例。
 
 ### v0.6.23
 

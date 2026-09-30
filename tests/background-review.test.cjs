@@ -75,6 +75,11 @@ const context = vm.createContext({
 });
 vm.runInContext(source, context, { filename: backgroundPath });
 
+// 测试用 fetch 注入点：让端到端用例可以控制抓取结果。
+let currentFetch = async () => { throw new Error('network disabled in unit test'); };
+context.fetch = (...args) => currentFetch(...args);
+context.__setFetch = (fn) => { currentFetch = fn; };
+
 async function test() {
   assert.equal(context.nextEventSequence(undefined), 1);
   assert.equal(context.nextEventSequence(0), 1);
@@ -111,14 +116,48 @@ async function test() {
   assert.equal(first.eventKey, same.eventKey);
   assert.notEqual(first.eventKey, next.eventKey);
 
+  // 基线已被其他设备推进过时，本次检测不得再触发通知。
+  const stored = { type: 'page', lastHash: 'hash-from-other-device' };
+  assert.equal(
+    context.baselineSuperseded({ changed: true, baseValue: 'old-hash', baseField: 'lastHash' }, stored),
+    true,
+    'a superseded baseline must suppress the notification'
+  );
+  assert.equal(
+    context.baselineSuperseded({ changed: true, baseValue: 'hash-from-other-device', baseField: 'lastHash' }, stored),
+    false,
+    'a matching baseline must remain notifyable'
+  );
+  assert.equal(
+    context.baselineSuperseded({ changed: false, baseValue: 'old', baseField: 'lastValue' }, { type: 'element', lastValue: 'other' }),
+    false,
+    'an unchanged result is never superseded'
+  );
+  assert.equal(
+    context.baselineSuperseded({ changed: true, baseValue: null, baseField: 'lastValue' }, { type: 'element', lastValue: null }),
+    false,
+    'both baselines unset must match'
+  );
+
+  // 被抢先记录时不得用本次抓取值覆盖存储基线，否则更新的变化会被吞掉。
+  const supersededUpdate = context.updateWithoutSupersededBaseline(
+    { baseField: 'lastValue', update: { lastValue: 'newer', selector: '#a' } },
+    { type: 'element', lastValue: 'stored' }
+  );
+  assert.equal(supersededUpdate.lastValue, undefined, 'a superseded baseline must not overwrite the stored value');
+  assert.equal(supersededUpdate.selector, '#a', 'unrelated update fields must be preserved');
+  const pageUpdate = context.updateWithoutSupersededBaseline(
+    { baseField: 'lastHash', update: { lastHash: 'hash2' } },
+    { type: 'page', lastHash: 'hash1' }
+  );
+  assert.equal(pageUpdate.lastHash, undefined, 'page baselines must also be preserved when superseded');
+
   syncStore.clear();
   syncStore.set('history', [{ url: eventBase.url, message: first.message, read: true }]);
-  assert.equal(await context.hasReadEvent(first), true, 'legacy read history should suppress a matching event');
+  assert.equal(context.hasSeenEvent(first, syncStore.get('history')), true, 'legacy read history should suppress a matching event');
   syncStore.set('history', [{ url: eventBase.url, message: first.message, eventKey: first.eventKey, read: true }]);
-  assert.equal(await context.hasReadEvent(first), true, 'read event key should suppress the same event');
-  assert.equal(await context.hasReadEvent(next), false, 'a new sequence must remain notifyable');
-  syncStore.set('history', [{ url: eventBase.url, message: first.message, eventKey: first.eventKey, read: false }]);
-  assert.equal(await context.hasReadEvent(first), false, 'unread history must not suppress a notification');
+  assert.equal(context.hasSeenEvent(first, syncStore.get('history')), true, 'read event key should suppress the same event');
+  assert.equal(context.hasSeenEvent(next, syncStore.get('history')), false, 'a new sequence must remain notifyable');
 
   syncStore.clear();
   notificationCount = 0;
@@ -173,6 +212,85 @@ async function test() {
   }]);
   await context.pruneHistory();
   assert.equal(syncStore.get('history').length, 0, 'expired pending claims should be pruned');
+
+  // 端到端：另一台设备已记录基线时，本机不再重复通知，且保留存储中的基线。
+  syncStore.clear();
+  notificationCount = 0;
+  const e2eHtml = '<html><body>C</body></html>';
+  const htmlRes = { ok: true, headers: { get: () => String(e2eHtml.length) } };
+  context.__setFetch(async () => ({
+    ok: true,
+    status: 200,
+    headers: htmlRes.headers,
+    body: null,
+    text: async () => e2eHtml,
+  }));
+  const pageMonitor = {
+    id: 'page-e2e',
+    name: 'e2e',
+    url: 'https://example.test/e2e',
+    type: 'page',
+    interval: 5,
+    lastHash: 'stale-hash-from-this-device',
+    baselined: true,
+    eventSeq: 3,
+  };
+  // 存储中的基线已被另一台设备推进，且与本机快照不同 -> 视为已被抢先记录
+  syncStore.set('monitors', [{
+    ...pageMonitor,
+    lastHash: 'hash-written-by-other-device',
+    lastValue: '',
+  }]);
+  const supersededResult = await context.checkMonitor(pageMonitor);
+  assert.equal(supersededResult, 'changed-elsewhere', 'a superseded change must not notify');
+  assert.equal(notificationCount, 0, 'no notification may be sent for a superseded change');
+  assert.equal(
+    syncStore.get('monitors')[0].lastHash,
+    'hash-written-by-other-device',
+    'the stored baseline must survive a superseded check'
+  );
+  assert.equal(
+    syncStore.get('monitors')[0].eventSeq,
+    3,
+    'a superseded change must not consume an event sequence'
+  );
+
+  // 端到端：基线一致时正常通知，并消耗一个事件序号。
+  syncStore.clear();
+  notificationCount = 0;
+  const freshHtml = '<html><body>D</body></html>';
+  const freshNextHtml = '<html><body>E</body></html>';
+  context.__setFetch(async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => String(freshHtml.length) },
+    body: null,
+    text: async () => freshHtml,
+  }));
+  const freshMonitor = {
+    id: 'page-fresh',
+    name: 'fresh',
+    url: 'https://example.test/fresh',
+    type: 'page',
+    interval: 5,
+    lastHash: null,
+    baselined: true,
+    eventSeq: 7,
+  };
+  const freshOutcome = await context.checkPage(freshMonitor, freshHtml);
+  freshMonitor.lastHash = freshOutcome.update.lastHash;
+  syncStore.set('monitors', [{ ...freshMonitor }]);
+  context.__setFetch(async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => String(freshNextHtml.length) },
+    body: null,
+    text: async () => freshNextHtml,
+  }));
+  const freshResult = await context.checkMonitor(freshMonitor);
+  assert.equal(freshResult, 'changed', 'a real change must still notify');
+  assert.equal(notificationCount, 1, 'a real change must send exactly one notification');
+  assert.equal(syncStore.get('monitors')[0].eventSeq, 8, 'a real change must consume an event sequence');
 
   syncStore.clear();
   syncStore.set('monitors', [{
