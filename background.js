@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.28 - flaky baseline write-back never rolls back)
+ * 333 Watcher - Background Service Worker (v0.6.29 - per-monitor error isolation on catch-up)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -752,7 +752,7 @@ async function checkMonitor(monitor) {
         return 'baselined';
       }
       if (changed && !superseded) {
-        await notifyChange(saved.monitor, { oldValue: last, newValue: cur });
+        await safeNotify('change', saved.monitor, { oldValue: last, newValue: cur });
         return 'changed';
       }
       if (changed) return 'changed-elsewhere';
@@ -896,7 +896,7 @@ async function checkMonitor(monitor) {
     return 'error';
   }
   if (wasInvalid) {
-    await notifyRecovered(saved);
+    await safeNotify('recovered', saved);
   }
 
   // 新建/重建监控的第一次成功检查只建立基线，不发变化通知
@@ -937,7 +937,7 @@ async function checkMonitor(monitor) {
         return 'flaky';
       }
     }
-    await notifyChange(saved, {
+    await safeNotify('change', saved, {
       oldValue: outcome.prevValue,
       newValue: outcome.update.lastValue
     });
@@ -1235,6 +1235,26 @@ async function notifyChange(monitor, change) {
   return result;
 }
 
+/**
+ * 发送提醒，但绝不让异常冒泡到调用方。
+ *
+ * 基线此时已经落盘，检测流程已经算"做完"了；提醒写不进 history（配额/离线）
+ * 或notifications.create 抛错时，若让异常一路冒泡出 checkMonitor，
+ * 启动补检的 for 循环会当场中断，后面所有逾期监控都被静默跳过。
+ * 基线已推进，下个周期本就不会重报这次变化——漏提醒无法自动补回，
+ * 但跳过其余监控会造成大范围漏检，两害相权取轻，这里只记日志。
+ */
+async function safeNotify(kind, monitor, change) {
+  try {
+    if (kind === 'change') return await notifyChange(monitor, change);
+    if (kind === 'recovered') return await notifyRecovered(monitor);
+    if (kind === 'invalid') return await notifyInvalid(monitor, change);
+  } catch (err) {
+    console.error('[333 Watcher] notify failed (baseline already saved):', kind, monitor && monitor.id, err && err.message);
+  }
+  return { ok: false, skipped: true, error: null };
+}
+
 async function notifyInvalid(monitor, reason) {
   const name = monitor.name || monitor.url;
   const message = '"' + name + '" 监控失效：' + reason + '\n请检查网址是否有效，或重新拾取元素';
@@ -1283,7 +1303,7 @@ async function markCheckFailure(monitorId, checkedAt, reason, kind) {
     });
     if (!write.saved) return kind === 'not-found' ? 'not-found' : 'error';
     if (toNotify) {
-      await notifyInvalid(toNotify.monitor, reason + '（连续失败 ' + toNotify.failCount + ' 次）');
+      await safeNotify('invalid', toNotify.monitor, reason + '（连续失败 ' + toNotify.failCount + ' 次）');
     }
   } catch (err) {
     // 失败计数写不进去时不能假装成功：log 出来，便于在扩展里排查同步配额/离线问题。
@@ -1591,11 +1611,16 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   const monitors = await getMonitors();
   const monitor = monitors.find((m) => m.id === monitorId);
   if (monitor) {
-    await checkMonitor(monitor);
+    try {
+      await checkMonitor(monitor);
+    } catch (err) {
+      // 监听器里的未捕获 rejection 只会变成一条无上下文的日志，这里补上 id。
+      console.error('[333 Watcher] alarm check failed:', monitorId, err && err.message);
+    }
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.28)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.29)');
 
 
 
@@ -1767,7 +1792,13 @@ async function catchUpChecks() {
     const next = Number(m.nextCheckTime) || 0;
     if (next <= now) {
       dbg('[333 Watcher] catch-up check (overdue):', m.url);
-      await checkMonitor(m);
+      // 逐个隔离：单个监控抛错（网络异常、存储配额、通知链路）不得让其余
+      // 逾期监控在本次开机补检中被静默跳过。
+      try {
+        await checkMonitor(m);
+      } catch (err) {
+        console.error('[333 Watcher] catch-up check failed:', m.id, err && err.message);
+      }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }

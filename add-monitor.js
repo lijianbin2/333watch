@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.28 - 抖动回写不再倒推基线)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.29 - 启动补检逐个隔离错误)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）

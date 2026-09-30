@@ -700,6 +700,110 @@ async function test() {
     'a flaky write-back must not roll the baseline back over a newer value'
   );
 
+  // ---- 启动补检：单个监控抛错不得中断其余监控的补检 ----
+  // 通知链路里任何一次 history 写入失败（配额/离线）都会让 notifyOnce reject，
+  // 而 checkMonitor 没有兜底 catch，异常会一路冒泡出 catchUpChecks 的 for 循环，
+  // 导致后面所有逾期监控在本次开机补检中被静默跳过。
+  syncStore.clear();
+  notificationCount = 0;
+  const pageHtml = '<html><body>catchup</body></html>';
+  const catchupBase = await context.checkPage({ id: 'cu-page', type: 'page' }, pageHtml);
+  const catchupPage = {
+    id: 'cu-page',
+    name: 'cu-page',
+    url: 'https://example.test/catchup-page',
+    type: 'page',
+    interval: 5,
+    lastHash: catchupBase.update.lastHash,
+    baselined: true,
+    nextCheckTime: 0,
+    eventSeq: 0,
+  };
+  const catchupLink = {
+    id: 'cu-link',
+    name: 'cu-link',
+    url: 'https://example.test/catchup-link',
+    type: 'download',
+    interval: 5,
+    targetText: 'Download',
+    lastValue: 'https://example.test/old.zip',
+    baselined: true,
+    nextCheckTime: 0,
+    eventSeq: 0,
+  };
+  syncStore.set('monitors', [catchupLink, catchupPage]);
+  context.__setFetch(async (url) => {
+    const html = String(url).includes('catchup-link')
+      ? linkHtml('https://example.test/new.zip')
+      : pageHtml;
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => String(html.length) },
+      body: null,
+      text: async () => html,
+    };
+  });
+  // history 写不进去（模拟配额不足）：通知必然失败。
+  const realSyncSetForCatchup = chrome.storage.sync.set;
+  chrome.storage.sync.set = async (values) => {
+    if (Object.prototype.hasOwnProperty.call(values, 'history')) {
+      throw new Error('QUOTA_BYTES quota exceeded');
+    }
+    return realSyncSetForCatchup(values);
+  };
+  try {
+    await context.catchUpChecks();
+  } finally {
+    chrome.storage.sync.set = realSyncSetForCatchup;
+  }
+  const afterCatchup = syncStore.get('monitors');
+  assert.ok(
+    afterCatchup.find((m) => m.id === 'cu-link').lastCheck,
+    'the failing monitor must still record its check'
+  );
+  assert.ok(
+    afterCatchup.find((m) => m.id === 'cu-page').lastCheck,
+    'a failing monitor must not abort catch-up for the remaining monitors'
+  );
+  assert.equal(notificationCount, 0, 'a failed history write must not notify');
+
+  // ---- 启动补检：监控自身抛错（非通知链路）同样不得中断补检循环 ----
+  // checkMonitor 开头的 getMonitors() 不在 try 内，storage 抛错会直接冒泡出
+  // catchUpChecks 的 for 循环，第二个逾期监控就再也不会被检查。
+  syncStore.clear();
+  notificationCount = 0;
+  const guardHtml = '<html><body>guard</body></html>';
+  const guardBase = await context.checkPage({ id: 'g-page', type: 'page' }, guardHtml);
+  const guardPageA = {
+    id: 'g-page-a', name: 'g-a', url: 'https://example.test/g-a', type: 'page',
+    interval: 5, lastHash: guardBase.update.lastHash, baselined: true, nextCheckTime: 0, eventSeq: 0,
+  };
+  const guardPageB = {
+    id: 'g-page-b', name: 'g-b', url: 'https://example.test/g-b', type: 'page',
+    interval: 5, lastHash: guardBase.update.lastHash, baselined: true, nextCheckTime: 0, eventSeq: 0,
+  };
+  syncStore.set('monitors', [guardPageA, guardPageB]);
+  context.__setFetch(async () => ({
+    ok: true, status: 200, headers: { get: () => String(guardHtml.length) },
+    body: null, text: async () => guardHtml,
+  }));
+  // 只让第一个监控的检查抛错（模拟 storage 读取异常），第二个必须照常补检。
+  const realCheckMonitor = context.checkMonitor;
+  context.checkMonitor = async (m) => {
+    if (m.id === 'g-page-a') throw new Error('storage exploded');
+    return realCheckMonitor(m);
+  };
+  try {
+    await context.catchUpChecks();
+  } finally {
+    context.checkMonitor = realCheckMonitor;
+  }
+  assert.ok(
+    syncStore.get('monitors').find((m) => m.id === 'g-page-b').lastCheck,
+    'a throwing monitor must not abort catch-up for the remaining monitors'
+  );
+
   // ---- monitors 整键读-改-写必须串行化，否则并发写入互相覆盖 ----
   syncStore.clear();
   // 给 storage 读加延迟：没有互斥锁时两个读会交错，导致后写者覆盖先写者。

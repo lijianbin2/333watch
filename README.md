@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.28**
+当前版本：**v0.6.29**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -249,7 +249,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.28"
+$version = "0.6.29"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -270,6 +270,13 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.29
+
+- 修复开机补检"一个监控出错、后面全部不检查"：启动时会补检所有已逾期的监控。原实现直接在 `for` 循环里 `await checkMonitor(m)`，任何一次抛错都会中断整个循环——排在后面的逾期监控在这次开机里被静默跳过，要等下一个周期才被发现。现在每个监控独立 `try/catch`，单个失败只记日志、不影响其余监控；
+- 修复通知链路的异常冒泡：提醒要写 `history` 才能跨设备去重，这一步遇到配额不足或离线会抛错，而 `checkMonitor` 此前没有兜底，异常会一路冒泡出补检循环。基线此时已经落盘、检测已算完成，这次变化下个周期不会再被判定——漏掉的提醒无法自动补回，但因此跳过其余所有监控的代价大得多，所以新增 `safeNotify()` 统一兜住发送/恢复/失效三类提醒的异常，只记日志；
+- 定时闹钟回调同样补上 `try/catch`，避免 service worker 里出现无上下文的未捕获 rejection；
+- 新增两组回归测试：一组让 `history` 写入抛配额错误（模拟通知必然失败），一组让单个监控的 `checkMonitor` 直接抛错，均断言其余逾期监控仍完成补检。已验证两组用例在修复前都会失败。
 
 ### v0.6.28
 
