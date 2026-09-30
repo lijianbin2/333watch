@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.35 - 跨设备重复通知竞态修复)
+ * 333 Watcher - Background Service Worker (v0.6.36 - 下载链接选择器站点标记降级)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -1736,7 +1736,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.35)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.36)');
 
 
 

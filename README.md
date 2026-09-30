@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.35**
+当前版本：**v0.6.36**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -246,7 +246,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.35"
+$version = "0.6.36"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -267,6 +267,18 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.36
+
+- 修复下载链接选择器在**同页面多种下载**时的塌缩，这是 v0.6.33/0.6.35 之后的残留问题。
+  - 旧实现里，只要 href 带 `wechat_devtools` 就直接 `return a[href*="wechat_devtools"]`。但微信开发者工具下载页上**每一个**链接都带这个路径（Windows / Mac、x64 / arm64 / .dmg 全都带），这个条件零区分度。
+  - 结果旗舰场景里三种下载塌缩成同一个选择器，`querySelector` 永远只命中第一个：首次检查立刻误报一次"已变化"，之后真正被监控的那个链接怎么变都发现不了。
+  - 修复方式：**站点标记降级为附加条件**。区分主体交给「扩展名 + 版本号之前的词干 + 架构/平台标记」，站点标记（`wechat_devtools` / `wxqcloud`）只作为额外条件追加在末尾。选择器形状从 `a[href*="wechat_devtools"]` 变成 `a[href$=".exe"][href*="WeChatSetup"][href*="wechat_devtools"]`。
+  - `picker.js` 侧同步：`wxqcloud` 只能靠**主机名**识别（DOM 环境里有 `a.href` 绝对地址；`offscreen.js` 没有 baseURL，取不到主机名），因此两张 `SITE_MARKS` 表长度不同，已在测试里锁定包含关系防止漂移。
+- 修复一处会导致**整条监控自愈挂掉**的崩溃：`downloadSelectorParts` 里 `head` 声明为 `const`，但 `setup.exe` / `bin.zip` 这类"文件名整体就是一个标记"的文件会命中 `if (!head) head = stem` 兜底分支 → `TypeError: Assignment to constant variable`。首次拾取和自愈两份实现都会踩到。已改为 `let`。
+- 新增下载扩展名白名单 `DOWNLOAD_EXT`：退化成 `a[href$=".exe"]` 之前先确认扩展名确实是下载项，否则 `/docs/v1.2` 这类普通导航链接会被误判成下载链接。`a[href$="..."]` 只会匹配 `a`，所以生成属性选择器的分支现在也只在 `tagName === 'A'` 时进入。
+- 已知取舍（写进测试注释，不隐藏）：「发版不失效」和「严格互斥」在 substring 选择器上不可兼得。x64 链接的 stem 往往是 arm64 链接 stem 的前缀（`WeChatSetup` ⊂ `WeChatSetup_arm64`），而 CSS 属性选择器没有"stem 之后不许再跟标记"的写法。取舍为**版本鲁棒性优先** —— 剥掉版本号，因此 x64 选择器会顺带命中 arm64 兄弟项；反向（arm64 带了 `[href*="arm64"]`）不会命中 x64。偏差是单向的，且不会再退化成"多种下载共用一个选择器"。
+- 测试：新增旗舰场景三链接互斥断言（含迷你选择器匹配器直接验证"只命中目标"）、版本升级鲁棒性、导航链接不退化断言、`QUALIFIER_TOKEN` 两份实现的字面量漂移守卫。已用 `git stash` 验证修复前必然失败。
 
 ### v0.6.35
 

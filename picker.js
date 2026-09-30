@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - 元素选择器 Content Script v0.6.35
+ * 333 Watcher - 元素选择器 Content Script v0.6.36
  * 修复：微信文档等 Vue 页面选不到的问题
  */
 (function () {
@@ -32,12 +32,46 @@
   appendSafe(overlay);
   appendSafe(tip);
   appendSafe(badge);
-  console.log('[333 Watcher] picker overlay injected v0.6.35', overlay, tip, badge, location.href);
+  console.log('[333 Watcher] picker overlay injected v0.6.36', overlay, tip, badge, location.href);
 
   // 下载链接的选择器：扩展名保底（版本升级改名后仍然命中），再加文件名词干做区分。
   // 只用 `a[href$=".exe"]` 时，多下载项页面（多版本、多架构、不同产品）永远命中
   // 第一个 a：用户点的是第三个，监控却盯住第一个——首次检查立刻误报一次
   // "已变化"，之后真正的目标链接怎么变都不会被发现。
+  // 架构 / 平台 / 渠道标记：这些是下载地址的**身份**，不能被版本剥离规则吃掉。
+  var QUALIFIER_TOKEN = /^(arm|arm64|armhf|aarch64|x64|x86|x86_64|amd64|64|32|386|i386|ia32|win|win32|win64|windows|winnt|linux|musl|gnu|mac|macos|osx|darwin|intel|bit|bits|insider|beta|alpha|rc|preview|universal|any|setup|bin|src)$/i;
+  var VERSION_TOKEN = /^v?\d+$/i;
+  // 站点标记只能当**附加**条件：微信开发者工具页里 x64 / arm64 / .dmg 的链接
+  // 全都带 wechat_devtools，只用它做选择器会把三种下载全塌缩成一个。
+  // wxqcloud 只能靠主机名识别（这里是 DOM 环境，有 a.href 绝对地址；
+  // offscreen.js 无 baseURL，取不到主机名，故那张表更短）。
+  var SITE_MARKS = ['wechat_devtools', 'wxqcloud'];
+  // 退化成 `a[href$=".exe"]` 之前先确认扩展名确实是下载项，
+  // 否则 /docs/v1.2 这类导航链接会被误当成下载链接。
+  var DOWNLOAD_EXT = /^\.(exe|msi|msix|appx|appimage|apk|deb|rpm|dmg|pkg|zip|7z|rar|tar|gz|tgz|bz2|xz|iso|img|bin|jar|war|crx|xpi|whl)$/i;
+  // 纯数字段：既可能是版本号，也可能是位数（putty-64-bit）。
+  // 只有"纯数字且不是标记"才算版本号，64/32 已在标记表里，因此不会被剥掉。
+  function isVersionToken(t) { return VERSION_TOKEN.test(t) && !QUALIFIER_TOKEN.test(t); }
+  function attrQuote(value) { return JSON.stringify(String(value)); }
+
+  function siteMarks(href, absHref) {
+    var hay = String(href || '') + ' ' + String(absHref || '');
+    var out = [];
+    for (var i = 0; i < SITE_MARKS.length; i++) {
+      if (hay.indexOf(SITE_MARKS[i]) !== -1) out.push(SITE_MARKS[i]);
+    }
+    return out;
+  }
+
+  function downloadExt(href) {
+    var path = String(href || '').split(/[?#]/)[0];
+    var base = path.slice(path.lastIndexOf('/') + 1);
+    var dot = base.lastIndexOf('.');
+    if (dot <= 0) return null;
+    var ext = base.slice(dot);
+    return DOWNLOAD_EXT.test(ext) ? ext : null;
+  }
+
   function downloadSelectorParts(href) {
     var raw = String(href || '');
     var path = raw.split(/[?#]/)[0];           // 签名链接的 token 每次都变，不能进选择器
@@ -45,9 +79,47 @@
     var dot = base.lastIndexOf('.');
     if (dot <= 0) return null;
     var stem = base.slice(0, dot);
-    var hint = stem.replace(/[._-]?v?\d+(?:[._-]\w+)*$/i, '');  // WeChatSetup_4.0.6.19 -> WeChatSetup
-    if ((hint.match(/[a-z]/gi) || []).length < 3) return null;   // 至少 3 个字母才有区分度
-    return { ext: base.slice(dot), hint: hint };
+    var ext = base.slice(dot);
+
+    // 按 [._-] 切段并记住每段在 stem 里的结束位置：head/tail 都必须是原串的
+    // **连续切片**，不能把切开的段重新拼起来（putty-64 的段拼成 "putty64"，
+    // 而 href 里是 "putty-64"，substring 匹配会直接失配）。
+    var segs = [], re = /[^._-]+/g, m;
+    while ((m = re.exec(stem))) segs.push({ t: m[0], e: m.index + m[0].length });
+
+    // 末尾连续的标记段（win-x64 / 64-bit / x64-insider）单独作为附加条件。
+    // v0.6.33 用一条"剥掉末尾数字"的正则把 arm64、x64、win、linux 一起剥掉了，
+    // 于是同产品的不同架构又塌缩成同一个 hint：用户点 arm64，监控却盯上 x64。
+    var tStart = -1, i;
+    for (i = segs.length - 1; i >= 0; i--) { if (QUALIFIER_TOKEN.test(segs[i].t)) { tStart = i; break; } }
+    if (tStart >= 0) { while (tStart > 0 && QUALIFIER_TOKEN.test(segs[tStart - 1].t)) tStart--; }
+    var cut = tStart >= 0 ? tStart : segs.length;
+    var tailSegs = segs.slice(cut);
+    while (tailSegs.length && isVersionToken(tailSegs[tailSegs.length - 1].t)) tailSegs.pop();
+    // 头部剥掉末尾版本段：WeChatSetup_4.0.6.19 -> WeChatSetup
+    var headSegs = segs.slice(0, cut);
+    while (headSegs.length && isVersionToken(headSegs[headSegs.length - 1].t)) headSegs.pop();
+
+    var head = headSegs.length ? stem.slice(0, headSegs[headSegs.length - 1].e) : '';
+    var tail = [];
+    for (i = 0; i < tailSegs.length; i++) tail.push(tailSegs[i].t);
+    if (!head) { head = stem; tail = []; }   // 整段都是标记（arm64.exe）时整段当 hint
+
+    var letters = (head + tail.join('')).match(/[a-z]/gi) || [];
+    if (letters.length < 3) return null;                            // 至少 3 个字母才有区分度
+    if (tail.length && ((head.match(/[a-z]/gi) || []).length < 2)) return null;  // head 太短，substring 太泛
+    return { ext: ext, hint: head, tail: tail };
+  }
+
+  // 每个 tail 标记单独成一个条件，而不是拼成 "win-x64"：
+  // 分隔符样式（-/_/.）各站点不同，逐段匹配才不会因为分隔符不同而失配。
+  function buildDownloadSelector(parts, marks) {
+    var sel = 'a[href$=' + attrQuote(parts.ext) + '][href*=' + attrQuote(parts.hint) + ']';
+    for (var i = 0; i < parts.tail.length; i++) {
+      sel += '[href*=' + attrQuote(parts.tail[i]) + ']';
+    }
+    if (marks) for (var j = 0; j < marks.length; j++) sel += '[href*=' + attrQuote(marks[j]) + ']';
+    return sel;
   }
 
   function getSelector(el) {
@@ -55,11 +127,15 @@
     if (el.tagName === 'A' || (el.closest && el.closest('a'))) {
       var a = (el.closest && el.closest('a')) || el;
       var href = (a.getAttribute && a.getAttribute('href')) || '';
-      if (href.indexOf('wechat_devtools') !== -1) return 'a[href*="wechat_devtools"]';
+      var marks = siteMarks(href, a.href);
       var parts = downloadSelectorParts(href);
-      if (parts) return 'a[href$="' + parts.ext + '"][href*="' + parts.hint + '"]';
-      if (href.slice(-4) === '.exe') return 'a[href$=".exe"]';
-      if (href) { try { var u = new URL(a.href); if (u.hostname.indexOf('wxqcloud') !== -1) return 'a[href*="wxqcloud"]'; } catch(e){} }
+      if (parts) return buildDownloadSelector(parts, marks);
+      var ext = downloadExt(href);
+      if (ext) {
+        var sel = 'a';
+        for (var k = 0; k < marks.length; k++) sel += '[href*=' + attrQuote(marks[k]) + ']';
+        return sel + '[href$=' + attrQuote(ext) + ']';
+      }
     }
     if (el.id) return '#' + CSS.escape(el.id);
     if (el.getAttribute && el.getAttribute('data-testid')) return el.tagName.toLowerCase() + '[data-testid="' + String(el.getAttribute('data-testid')).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]';

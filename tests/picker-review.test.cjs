@@ -135,14 +135,35 @@ assert.equal(x64, getSelector(anchor('/dl/WeChatSetup_x64.exe?v=2')), 'query str
 assert.ok(!/v=2/.test(x64), 'volatile query strings must stay out of the selector, got: ' + x64);
 // 区分度不足的名字不加提示，保持旧的宽松行为。
 assert.equal(getSelector(anchor('/dl/a.exe')), 'a[href$=".exe"]', 'a non-distinguishing name must not add a hint');
-// 微信开发者工具专用分支保持原样。
+// 站点标记只作附加条件，不能单独构成选择器。
+// 微信开发者工具下载页上每个链接都带 wechat_devtools 路径，
+// 旧实现直接返回 a[href*="wechat_devtools"]，x64 / arm64 / .dmg 全塌缩成一个。
 assert.equal(
   getSelector(anchor('https://dldir1.qq.com/wechat_devtools/x86/setup.exe')),
-  'a[href*="wechat_devtools"]',
-  'the wechat_devtools branch must be preserved'
+  'a[href$=".exe"][href*="setup"][href*="wechat_devtools"]',
+  'the wechat_devtools site mark must survive as an extra condition'
+);
+const flagship = [
+  'https://dldir1.qq.com/wechat_devtools/Windows/WeChatSetup.exe',
+  'https://dldir1.qq.com/wechat_devtools/Windows/WeChatSetup_arm64.exe',
+  'https://dldir1.qq.com/wechat_devtools/Mac/WeChatSetup.dmg',
+].map((h) => getSelector(anchor(h)));
+assert.equal(new Set(flagship).size, 3, 'x64 / arm64 / .dmg must not share a selector, got: ' + flagship.join(' | '));
+// wxqcloud 是靠主机名识别的标记：主机名出现在 a.href 里，不在 getAttribute('href') 里。
+assert.ok(
+  getSelector(anchor('https://dldir1.qq.com/wxqcloud/WeChat.exe')).includes('wxqcloud'),
+  'a wxqcloud-hosted download must keep its site mark'
 );
 // 普通导航链接仍走结构路径，不要被改成属性选择器。
 const navSel = getSelector(anchor('/pricing'));
 assert.ok(!/\[href/.test(navSel), 'plain navigation links must not become attribute selectors, got: ' + navSel);
+// 带点但区分度不足的导航链接不能退化成裸 a[href$=".x"]。
+for (const navHref of ['/docs/v1.2', '/users/a.b']) {
+  const sel = getSelector(anchor(navHref));
+  assert.ok(
+    !/\[href\$=".2"\]|\[href\$=".b"\]/.test(sel),
+    'a low-signal navigation link must not become a bare extension selector: ' + navHref + ' -> ' + sel
+  );
+}
 
 console.log('picker-review tests passed');
