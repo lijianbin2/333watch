@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.41 - 监控增删改与导入)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.42 - 监控增删改与导入)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -913,11 +913,22 @@ function monitorUpdatedAt(m) {
   return 0;
 }
 
-// 检查结果反馈：renderList 是全量重建，所以反馈不能只写进旧 DOM 节点，
-// 要在重建前存下来，重建时再按监控 id 贴回新节点。
+// 检查结果反馈：renderList 是全量重建，反馈不能只写进旧 DOM 节点，
+// 要先存下来，重建时再按监控 id 贴回新节点。
 let pendingCheckFeedback = null;
 
-async function renderList() {
+// renderList 是 async 且调用方普遍不 await它（init 首屏、检查结果、增删改、
+// 测试面板都会触发），多轮重建会交错：先 await getMonitors() 的那轮可能**后**落地，
+// 用旧快照 innerHTML='' 冲掉刚落地的结果。用一条 promise 链把重建串起来，
+// 保证"最后发起的那一轮"就是最后落地的那一轮，反馈也就不会莫名其妙消失。
+let _renderChain = Promise.resolve();
+function renderList() {
+  const run = _renderChain.then(() => renderListUnlocked(), () => renderListUnlocked());
+  _renderChain = run.then(() => {}, () => {});
+  return run;
+}
+
+async function renderListUnlocked() {
   const monitors = (await getMonitors()).slice().sort((a, b) => monitorUpdatedAt(b) - monitorUpdatedAt(a));
   countEl.textContent = monitors.length;
 
@@ -1057,8 +1068,9 @@ async function renderList() {
   // 反馈必须在本轮重建**结束之后**才贴：renderList 是 async，而调用方并不 await
   // 它（init 的首屏渲染、检查结果、删除等都会并发触发），先完成的那一轮如果先贴
   // 再被后完成的一轮 innerHTML='' 冲掉，结果就是"点了立即检查什么都没有"。
-  // 所以这里在同步建完所有节点后再按 id 贴，且不提前清空标记 —— 后完成的那一轮
-  // 读到同一个标记，照样会贴上。
+  // renderList 已通过 _renderChain 串行化，因此"最后发起的一轮"必然是"最后落地的
+  // 一轮"，贴完即可消费掉标记 —— 否则标记会一直残留，之后任何无关的重建（编辑、
+  // 删除、测试面板、init）都会把上一次的旧反馈重新贴回，等于用一个 bug 换另一个。
   if (pendingCheckFeedback) {
     const fb = pendingCheckFeedback;
     for (const li of Array.from(listEl.children)) {
@@ -1080,6 +1092,7 @@ async function renderList() {
         target.classList.add('hidden');
       }
     }
+    pendingCheckFeedback = null;
   }
 }
 

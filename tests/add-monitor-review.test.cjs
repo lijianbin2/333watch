@@ -21,7 +21,6 @@ function makeEl(id) {
     className: '',
     checked: false,
     disabled: false,
-    innerHTML: '',
     style: {},
     dataset: {},
     children: [],
@@ -44,6 +43,15 @@ function makeEl(id) {
     select() {},
     getBoundingClientRect() { return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }; },
   };
+  // 真实 DOM 里 `listEl.innerHTML = ''` 会丢掉所有子节点。桩若只把它当普通
+  // 字段，旧节点会一直留在 children 里，测试就会读到上一轮的残留 —— 正好把
+  // 本该被发现的"陈旧反馈复活"bug 藏起来。这里按真实语义清空。
+  let _html = '';
+  Object.defineProperty(el, 'innerHTML', {
+    get() { return _html; },
+    set(v) { _html = v; el.children.length = 0; },
+    enumerable: true,
+  });
   return el;
 }
 
@@ -324,8 +332,102 @@ function testCheckNowFeedbackSurvivesRender() {
   })();
 }
 
+// ---------------------------------------------------------------------------
+// 反馈贴回之后必须立刻被消费掉。v0.6.41 为了躲开 renderList 的竞态，没有清空
+// pendingCheckFeedback，于是这个标记永远残留：用户做过一次检查之后，之后任何
+// 无关的 renderList()（编辑、删除、测试面板、init 首屏）都会把那条旧反馈
+// 重新贴回 —— 例如编辑完某条监控，N 分钟前的「未找到目标」又冒出来了。
+// 这里跑"检查 → 无关重建"两步，断言旧反馈不会复活。
+// ---------------------------------------------------------------------------
+function testStaleFeedbackDoesNotResurrect() {
+  const byId = new Map();
+  const realMakeEl = makeEl;
+  const doc = {
+    getElementById: (id) => {
+      if (!byId.has(id)) byId.set(id, realMakeEl(id));
+      return byId.get(id);
+    },
+    createElement: (tag) => realMakeEl(tag),
+    querySelector: () => realMakeEl('sel'),
+    querySelectorAll: () => [],
+    addEventListener() {}, removeEventListener() {},
+    body: realMakeEl('body'),
+    documentElement: realMakeEl('html'),
+  };
+
+  const monitors = [{ id: 'm1', url: 'https://example.test/a', type: 'page', interval: 30 }];
+  const syncGet = async (key) => (key === 'monitors' ? { monitors } : {});
+
+  const ctx2 = vm.createContext({
+    chrome: {
+      runtime: {
+        id: 'test',
+        getManifest: () => ({ version: '0.0.0-test' }),
+        getURL: (p) => 'chrome-extension://test/' + p,
+        sendMessage: async (msg) => {
+          if (msg && msg.type === 'check-now') return { ok: true, result: 'changed' };
+          return { ok: true };
+        },
+        lastError: null,
+      },
+      storage: {
+        sync: { get: syncGet, set: async () => {}, remove: async () => {} },
+        local: { get: async () => ({}), set: async () => {}, remove: async () => {} },
+      },
+      tabs: { query: async () => [], sendMessage: async () => {}, create: () => {} },
+      scripting: { executeScript: async () => [] },
+      alarms: { create: () => {}, clear: async () => true, get: async () => null },
+      notifications: { create: () => {}, clear: async () => true },
+    },
+    console,
+    document: doc,
+    window: { addEventListener() {}, removeEventListener() {}, location: { href: 'https://example.test/' } },
+    location: { href: 'https://example.test/' },
+    navigator: { clipboard: null, userAgent: 'node' },
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    URL, JSON, Date, Math, Number, String, Object, Array, Set, Map, Promise,
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+    confirm: () => false,
+    alert: () => {},
+  });
+  ctx2.globalThis = ctx2;
+  vm.runInContext(source, ctx2, { filename: 'add-monitor.js' });
+
+  const listEl = doc.getElementById('monitor-list');
+  const readFeedback = () => {
+    const row = listEl.children[0];
+    if (!row) return null;
+    const info = row.children[0];
+    if (!info) return null;
+    return Array.from(info.children).find(
+      (c) => c && typeof c.className === 'string' && c.className.indexOf('watcher-feedback') !== -1
+    ) || null;
+  };
+
+  return (async () => {
+    // 第一次：跑完一次 checkNow，反馈应当可见。
+    await ctx2.checkNow('m1', realMakeEl('btn'), realMakeEl('feedback'));
+    const first = readFeedback();
+    assert.ok(first, 'the feedback element must exist after the first render');
+    assert.equal(first.textContent, '检测到变化，已发送通知 ✓', 'first render must show the feedback');
+
+    // 第二次重建：模拟用户编辑/删除/打开测试面板触发的无关 renderList()。
+    await ctx2.renderList();
+    const second = readFeedback();
+    assert.ok(second, 'the feedback element must exist after the second render');
+    assert.equal(
+      second.textContent, '',
+      'stale check feedback must not resurrect on an unrelated render'
+    );
+    console.log('add-monitor stale feedback tests passed');
+  })();
+}
+
 test();
-testCheckNowFeedbackSurvivesRender().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+testCheckNowFeedbackSurvivesRender()
+  .then(testStaleFeedbackDoesNotResurrect)
+  .catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
