@@ -190,7 +190,6 @@ Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 | `storage` | 保存监控配置、提醒历史和已读状态 |
 | `notifications` | 发送变化、失效和恢复提醒 |
 | `alarms` | 定时执行检查任务 |
-| `activeTab` | 在用户主动操作时访问当前页面 |
 | `scripting` | 注入元素拾取脚本 |
 | `offscreen` | 在受限 DOM 环境中解析监控页面 |
 | `<all_urls>` | 访问用户主动添加的 HTTP/HTTPS 监控地址 |
@@ -280,6 +279,11 @@ tar -tf $zip
 
 ### v0.6.49
 
+- 移除冗余的 `activeTab` 权限。代码里没有任何地方用到它：读当前标签页
+  `url` / `title` 靠的是 `host_permissions` 的 `<all_urls>`（只对
+  `http(s)` 生效，`/^https?:/` 守卫挡住 `chrome://`），注入拾取脚本用的
+  `chrome.scripting.executeScript` 在 `<all_urls>` 下同样不需要临时授权。
+  少一个权限，既减少审核期被判"过度申请"的风险，也让权限说明和实际行为一致。
 - 修复安装 / 启动链路里的未捕获 rejection，以及"一步失败、整条链停摆"。
   - `chrome.runtime.onInstalled` 与 `chrome.runtime.onStartup` 里是
     `migrateData` → `migrateHistoryToSync` → `syncAlarms` → `ensurePruneAlarm`
