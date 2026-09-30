@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.39 - 监控增删改与导入)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.40 - 监控增删改与导入)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）
@@ -258,6 +258,17 @@ function isActiveHistoryClaim(h) {
 }
 
 async function pruneHistory() {
+  // 优先让 background 裁剪：history 是整键读-改-写，本页与后台是两个 JS 上下文，
+  // 进程内互斥锁互不生效。本页拿旧快照裁剪后整键写回，会把后台刚写入的**在途认领**
+  // 一起抹掉，arbitrateClaim 发现认领不见了就判 'skip' —— 提醒被静默吞掉。
+  if (hasChromeStorage && chrome.runtime && chrome.runtime.sendMessage) {
+    try {
+      const res = await chrome.runtime.sendMessage({ type: 'prune-history' });
+      if (res && res.ok) return;
+    } catch (e) {
+      // background 不可用时退回本页直裁剪。
+    }
+  }
   try {
     const history = await getHistory();
     if (!history.length) return;

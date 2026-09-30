@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.39 - monitor id 全入口唯一化)
+ * 333 Watcher - Background Service Worker (v0.6.40 - history 整键读改写单一写者)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -1662,6 +1662,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // popup 打开时也会清理过期历史，这件事必须走 background：
+  // history 是整键读-改-写，popup 与后台是两个 JS 上下文、进程内互斥锁互不生效。
+  // popup 拿旧快照裁剪后整键写回，会把后台刚写入的**在途认领**一起抹掉；
+  // arbitrateClaim 发现自己的认领不见了就判 'skip' —— 这条提醒就被静默吞掉了
+  // （用户看到"页面明明变了却没提醒"）。标记已读/清除已读同理，已全部改走 background。
+  if (msg.type === 'prune-history') {
+    (async () => {
+      try {
+        await pruneHistory();
+        await updateBadge();
+        sendResponse({ ok: true });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+    })();
+    return true;
+  }
+
   // popup 的所有 monitors 写入都走这里：popup 与后台是两个 JS 上下文，进程内互斥锁
   // 互不生效，只有让 background 成为唯一写者才能真正避免整键覆盖丢数据。
   if (msg.type === 'mutate-monitors') {
@@ -1840,7 +1858,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.39)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.40)');
 
 
 

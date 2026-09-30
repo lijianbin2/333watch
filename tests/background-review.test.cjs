@@ -747,6 +747,31 @@ async function test() {
   await context.pruneHistory();
   assert.equal(syncStore.get('history').length, 0, 'expired pending claims should be pruned');
 
+  // popup 打开时也会裁剪历史。这条路径必须走 background：popup 与后台是两个
+  // JS 上下文，进程内互斥锁互不生效，popup 拿旧快照整键写回会把后台刚写入的
+  // **在途认领**一起抹掉 —— arbitrateClaim 发现认领不见了就判 'skip'，
+  // 提醒被静默吞掉（用户看到"页面明明变了却没提醒"）。
+  syncStore.clear();
+  syncStore.set('history', [
+    // 刚过期、应当被裁掉的记录：确保裁剪逻辑确实动了数据（不是空转早退）。
+    { id: 'stale-claim-3', url: eventBase.url, message: 'old', eventKey: 'ev-stale', claimAt: Date.now() - 10 * 60 * 1000, pending: true, read: false },
+    // 后台刚写入的在途认领：TTL 内，必须原样保留。
+    { id: 'inflight-claim', url: eventBase.url, message: 'new', eventKey: 'ev-inflight', claimAt: Date.now(), pending: true, read: false },
+  ]);
+  const pruned = plain(await sendMessage({ type: 'prune-history' }));
+  assert.equal(pruned.ok, true, 'prune-history must respond ok');
+  const afterPrune = syncStore.get('history');
+  assert.equal(
+    afterPrune.filter((h) => h && h.id === 'stale-claim-3').length,
+    0,
+    'an expired pending claim must still be pruned by the popup path'
+  );
+  assert.equal(
+    afterPrune.filter((h) => h && h.id === 'inflight-claim').length,
+    1,
+    'pruning must never drop an in-flight claim written by the background'
+  );
+
   // 端到端：另一台设备已记录基线时，本机不再重复通知，且保留存储中的基线。
   syncStore.clear();
   notificationCount = 0;

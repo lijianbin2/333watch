@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.39**
+当前版本：**v0.6.40**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -246,7 +246,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.39"
+$version = "0.6.40"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -267,6 +267,24 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.40
+
+- 修复**popup 打开时清理历史，会把后台正在投递的在途通知认领一起抹掉，导致提醒被静默吞掉**
+  （用户表现为「页面明明变了却没有提醒」）。
+  - 根因：`history` 是整键读-改-写。popup 与 background 是**两个 JS 上下文**，
+    `withHistoryLock` 只是进程内互斥，跨上下文完全无效。`add-monitor.js` 的 `pruneHistory()`
+    拿本页旧快照裁剪后**整键写回**，会连带覆盖掉后台刚写入的**在途认领**（`pending` 条目）。
+  - 后果链路很隐蔽：认领消失后 `arbitrateClaim` 找不到自己的记录，判定"可能已被别人投递"
+    → 返回 `'skip'` → **既不发通知，也不报错**。这跟"没检测到变化"表现完全一样，很难排查。
+  - 修复：新增 `prune-history` 消息处理器，popup 的裁剪统一交给 background 在
+    `withHistoryLock` 内执行；background 不可用时才退回本页直裁剪。
+  - 关键点：裁剪逻辑只丢弃**过期**认领（`!isActiveClaim`），TTL 内的在途认领必须保留 ——
+    否则就把上面的 bug 换个地方复现。标记已读/清除已读早已改走 background，这次把裁剪也补齐。
+- 顺带修复上一版版本号替换事故：6 个文件的版本字符串被误写成字面量 `0\.6\.39`
+  （正则转义残留），会导致 `manifest.json` 版本号非法、打包文件名出错。已全部纠正为 `0.6.40`。
+- 测试：新增两条断言 —— 过期认领仍被裁掉、TTL 内的在途认领 `inflight-claim` 必须保留；
+  已用 `git stash` 验证修复前必然失败。
 
 ### v0.6.39
 
