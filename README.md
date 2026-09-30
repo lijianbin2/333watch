@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.31**
+当前版本：**v0.6.32**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -246,7 +246,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.31"
+$version = "0.6.32"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -267,6 +267,13 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.32
+
+- 修复链接监控盯错地址：Service Worker 里没有 DOMParser，`extractLinks` 只能正则匹配 `<a>`。旧正则用 `[^>]*?href` 找属性，但 `[^>]*?` 里没有任何属性名边界，所以 `<a class="btn" data-href="/dl/fake.exe" href="/dl/real.exe">` 会先匹配到 `data-href` 里的 `href`、返回 `fake.exe`。下载页用 `data-href` 非常普遍，结果是真实 `href` 变了不报、`data-href` 变了反而误报，监控实际盯在一个错误的地址上。现在改为先整段捕获标签属性，再按属性名取值，取值边界不含 `-`，`data-href`、`xlink:href` 不会再被误认为 `href`；
+- 修复无引号属性值整个被跳过：`href=/dl/x.exe` 这种合法写法在旧实现里只认带引号的分支，标签匹配失败即被丢弃。链接监控因此会误报"页面已无此链接目标"，并最终把这条监控标记为失效。现在同时支持双引号、单引号、无引号三种写法，无引号分支在空白处即止，不会吞掉后续属性；
+- 顺带修好两个同源缺陷：属性值里的 `>`（`<a title="a > b" href=...>`）不再提前截断标签；`HREF` 大小写不敏感、`href` 值首尾空白会被 trim；
+- 新增 8 条 `extractLinks` 回归断言（`data-href` 不遮蔽真实 `href`、无引号取值、引号内 `>`、`HREF` 大小写、值 trim、无引号不吞后续标签、`javascript:`/`#`/`mailto:` 仍过滤、链接文本 stripTags + 空白归一），均已验证在修复前失败。
 
 ### v0.6.31
 

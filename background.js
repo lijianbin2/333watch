@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.31 - 跨设备重复通知修复)
+ * 333 Watcher - Background Service Worker (v0.6.32 - 链接提取修复)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -174,14 +174,33 @@ function stripTags(html) {
   return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+// 从属性串里取指定属性的值，支持带引号 / 无引号两种写法。
+// 名字前的边界刻意不含 "-"，这样 data-href、xlink:href 不会被误当成 href。
+const ATTR_RE_CACHE = {};
+function attrValue(attrString, name) {
+  let re = ATTR_RE_CACHE[name];
+  if (!re) {
+    re = ATTR_RE_CACHE[name] = new RegExp(
+      '(?:^|[\\s"\'/])' + name + '\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\'|([^\\s"\'=<>`]+))',
+      'i'
+    );
+  }
+  const m = re.exec(attrString || '');
+  if (!m) return '';
+  if (m[1] != null) return m[1].trim();
+  if (m[2] != null) return m[2].trim();
+  return (m[3] || '').trim();
+}
+
 // SW 无 DOMParser，link 类型用正则提取 <a>
+// 标签头用整段属性捕获，引号里的 ">" 不会提前截断标签。
 function extractLinks(html, baseUrl) {
   const links = [];
-  const re = /<a\b[^>]*?href\s*=\s*(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi;
+  const re = /<a\b((?:"[^"]*"|'[^']*'|[^>"'])*)>([\s\S]*?)<\/a>/gi;
   let m;
   while ((m = re.exec(html)) !== null) {
-    let href = m[2].trim();
-    const text = stripTags(m[3]);
+    let href = attrValue(m[1], 'href');
+    const text = stripTags(m[2]);
     if (!href || href.startsWith('javascript:') || href.startsWith('#') || href.startsWith('mailto:')) continue;
     try {
       href = new URL(href, baseUrl).href;
@@ -1644,7 +1663,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.31)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.32)');
 
 
 

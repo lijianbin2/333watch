@@ -172,6 +172,62 @@ async function test() {
   assert.equal(changed.changed, true);
   assert.equal(changed.prevValue, baseline.update.lastHash);
 
+  // ---------------- extractLinks：链接监控的取值基础 ----------------
+  // 旧实现用 /<a\b[^>]*?href\s*=\s*(["'])(.*?)\1.../ 匹配，有两个真实缺陷：
+  //
+  // 1) `[^>]*?href` 没有属性边界，`<a data-href="/fake.exe" href="/real.exe">`
+  //    会先匹配到 data-href 的值，于是链接监控盯在错误地址上 —— 真实 href 变化时
+  //    不报，data-href 变化时反而误报。下载页用 data-href 非常普遍。
+  // 2) 只认带引号的属性值，`<a href=/x.exe>` 这种合法写法整个被跳过，
+  //    链接监控会误报"页面已无此链接目标"并最终把监控标记为失效。
+  const linkBase = 'https://dl.test/page';
+  // 注意：background.js 在 vm realm 里执行，它返回的数组原型不是宿主的 Array，
+  // 直接 deepStrictEqual 会因原型不同而误报。这里用 Array.from 换回宿主数组。
+  const linksOf = (html) => Array.from(context.extractLinks(html, linkBase), (l) => l.href);
+  assert.deepEqual(
+    linksOf('<a class="btn" data-href="/dl/fake.exe" href="/dl/real.exe">Download</a>'),
+    ['https://dl.test/dl/real.exe'],
+    'data-href must not shadow the real href attribute'
+  );
+  assert.deepEqual(
+    linksOf('<a href=/dl/unquoted.exe>Unquoted</a>'),
+    ['https://dl.test/dl/unquoted.exe'],
+    'an unquoted href value must still be extracted'
+  );
+  assert.deepEqual(
+    linksOf('<a title="a > b" href="/dl/gt.exe">GT</a>'),
+    ['https://dl.test/dl/gt.exe'],
+    'a ">" inside a quoted attribute must not truncate the tag'
+  );
+  assert.deepEqual(
+    linksOf('<a HREF="/dl/upper.exe">Upper</a>'),
+    ['https://dl.test/dl/upper.exe'],
+    'href must stay case-insensitive'
+  );
+  assert.deepEqual(
+    linksOf('<a href="  /dl/trim.exe  ">Trim</a>'),
+    ['https://dl.test/dl/trim.exe'],
+    'surrounding whitespace in the href must be trimmed'
+  );
+  // 无引号属性值不能吞掉后面的标签：<a href=/x.exe><b>Text</b></a>
+  assert.deepEqual(
+    linksOf('<a href=/dl/plain2.exe><b>Plain2</b></a>'),
+    ['https://dl.test/dl/plain2.exe'],
+    'an unquoted href must stop at whitespace, not swallow following attributes'
+  );
+  // 非 http(s) 协议仍然要跳过。
+  assert.deepEqual(
+    linksOf('<a href="javascript:void(0)">x</a><a href="#top">y</a><a href="mailto:a@b.c">z</a>'),
+    [],
+    'javascript/hash/mailto links must stay filtered out'
+  );
+  // 文本内容仍要正确抽取（供 targetText 匹配使用）。
+  assert.equal(
+    context.extractLinks('<a href="/dl/t.exe"><span>Windows</span> 版</a>', linkBase)[0].text,
+    'Windows 版',
+    'link text must be stripped of tags and whitespace-normalised'
+  );
+
   const eventBase = {
     id: 'page-1',
     url: 'https://example.test/',
