@@ -9,6 +9,8 @@ const listeners = { runtime: [], notifications: [], storage: [], alarms: [] };
 const syncStore = new Map();
 const localStore = new Map();
 let notificationCount = 0;
+// offscreen 文档的生命周期状态：用于验证"查询失败也必须关闭"。
+let offscreenOpen = false;
 // 结构化克隆：真实 chrome.storage 读出的是副本，读写不共享引用。
 const clone = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
 
@@ -66,6 +68,11 @@ const chrome = {
     onInstalled: { addListener: (fn) => listeners.runtime.push(fn) },
     onStartup: { addListener: (fn) => listeners.runtime.push(fn) },
     sendMessage: async () => ({ ok: false }),
+  },
+  offscreen: {
+    hasDocument: async () => offscreenOpen,
+    createDocument: async () => { offscreenOpen = true; },
+    closeDocument: async () => { offscreenOpen = false; },
   },
   notifications: {
     onClicked: { addListener: (fn) => listeners.notifications.push(fn) },
@@ -1512,6 +1519,51 @@ async function test() {
     context.buildNotificationEvent(inv, 'change', '"公告页" 页面发生变化', { sequence: 7 }).eventKey,
     'change events stay deterministic without stableMessage'
   );
+
+  // ---------------- offscreen 文档必须在查询失败时也关闭 ----------------
+  // offscreen 文档是常驻 DOM 的后台文档，scheduleOffscreenClose 靠的是
+  // background.js 里一个模块级 setTimeout。service worker 随时可能被终止，
+  // 那个定时器随之消失 —— 所以关闭绝不能依赖"下一次成功查询顺带回收"。
+  // 旧实现把 scheduleOffscreenClose() 放在 sendMessage 之后：一旦
+  // sendMessage 抛错（SW 在消息在途时被终止、offscreen 文档先被关掉），
+  // 关闭就被整个跳过，文档常驻到浏览器会话结束。
+  const realSendMessage = chrome.runtime.sendMessage;
+  offscreenOpen = false;
+  chrome.runtime.sendMessage = async () => { throw new Error('Receiving end does not exist'); };
+  await assert.rejects(
+    () => context.queryElementValue('<p>x</p>', 'p', 'text'),
+    /Receiving end does not exist/,
+    'queryElementValue must propagate a failed offscreen query'
+  );
+  assert.equal(offscreenOpen, true, 'a failed query must still leave the document to be closed by the timer');
+  // 把 3 秒关闭定时器跑掉：文档必须真的被关掉，而不是永远挂着。
+  while (offscreenOpen) {
+    const before = vTimers.size;
+    assert.ok(pumpOneTimer(), 'a close timer must be pending after a failed query');
+    if (vTimers.size === before) break;
+  }
+  assert.equal(
+    offscreenOpen,
+    false,
+    'the offscreen document must be closed even when the query itself failed'
+  );
+
+  // findElementByValue 会把错误吞掉返回 null（自愈失败、下次重试是正确行为），
+  // 但关闭时机同样不能因为吞错而丢失。
+  offscreenOpen = false;
+  const heal = await context.findElementByValue('https://ex.test/', '<p>x</p>', 'x', 'text');
+  assert.equal(heal, null, 'findElementByValue swallows the failure and reports no selector');
+  while (offscreenOpen) {
+    const before = vTimers.size;
+    assert.ok(pumpOneTimer(), 'a close timer must be pending after a failed self-heal');
+    if (vTimers.size === before) break;
+  }
+  assert.equal(
+    offscreenOpen,
+    false,
+    'the offscreen document must be closed even when self-healing failed'
+  );
+  chrome.runtime.sendMessage = realSendMessage;
 
   stopClock();
   console.log('background-review tests passed');

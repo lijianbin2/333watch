@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.46**
+当前版本：**v0.6.47**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -256,7 +256,7 @@ git diff --check
 发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-$version = "0.6.46"
+$version = "0.6.47"
 $zip = "..\333-watcher-$version.zip"
 $files = @(
   ".gitignore",
@@ -277,6 +277,26 @@ tar -tf $zip
 ```
 
 ## 更新日志
+
+### v0.6.47
+
+- 修复 **offscreen 文档在查询失败时永不关闭**导致的常驻资源占用。
+  - 元素监控靠一个 offscreen document 解析抓取到的 HTML（`DOM_PARSER` 理由）。
+    这个文档是常驻 DOM 的后台文档，用完必须主动关掉，否则会一直占着内存。
+  - 旧实现把 `scheduleOffscreenClose()` 放在 `await sendMessage(...)` **之后**。
+    只要这次查询抛错（service worker 在消息在途时被终止、offscreen 文档在消息
+    抵达前已被关闭，都会让 `sendMessage` reject），关闭就被整个跳过。
+  - 危害取决于用户有没有元素监控：如果之后**再没有**元素查询，那个 3 秒关闭
+    定时器就没人触发了 —— 它是 `background.js` 的模块级变量，service worker
+    一重启就彻底消失，offscreen 文档会常驻到整个浏览器会话结束。
+  - 现在 `queryElementValue` 和 `findElementByValue` 都用 `try/finally` 把
+    `scheduleOffscreenClose()` 放进 `finally`，无论查询成功、业务上失败
+    （返回 `{ok:false}`）还是抛错，关闭都会被排上。`findElementByValue` 吞掉
+    异常返回 `null` 的行为不变（自愈失败、下次检查重试仍是正确行为）。
+- 新增 `background-review` 测试锁定这条路径：给测试脚手架补上 `chrome.offscreen`
+  mock，注入一个必定 reject 的 `sendMessage`，断言 `queryElementValue` 抛出该错误、
+  `findElementByValue` 返回 `null`，且两种情况下关闭定时器都真实被排上、
+  offscreen 文档最终确实被关闭。该断言已用修复前的 `background.js` 反向验证会失败。
 
 ### v0.6.46
 

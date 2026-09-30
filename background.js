@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.46 - 选择器日志与引用清理)
+ * 333 Watcher - Background Service Worker (v0.6.47 - offscreen 文档必定关闭)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -626,14 +626,21 @@ function scheduleOffscreenClose() {
 
 async function queryElementValue(html, selector, attribute) {
   await ensureOffscreen();
-  const resp = await chrome.runtime.sendMessage({
-    type: 'query-element',
-    html: stripHeavy(html),
-    selector: selector,
-    attribute: attribute
-  });
-  scheduleOffscreenClose();
-  return resp;
+  // finally 而不是正常路径末尾：sendMessage 本身也会 reject（service worker
+  // 在消息在途时被终止、offscreen 文档在消息抵达前已被关闭）。一旦走到
+  // catch/finally 之外，scheduleOffscreenClose 就被跳过，而它是模块级定时器
+  // —— service worker 一重启就彻底丢失，offscreen 文档会一直常驻，
+  // 直到下一次元素查询才被顺带回收。用户的监控全是整页时就再也不会有那次查询。
+  try {
+    return await chrome.runtime.sendMessage({
+      type: 'query-element',
+      html: stripHeavy(html),
+      selector: selector,
+      attribute: attribute
+    });
+  } finally {
+    scheduleOffscreenClose();
+  }
 }
 
 // ---------------- 检测：page ----------------
@@ -742,15 +749,20 @@ async function checkElement(monitor, html) {
 async function findElementByValue(baseUrl, html, value, attribute) {
   try {
     await ensureOffscreen();
-    const resp = await chrome.runtime.sendMessage({
-      type: 'find-by-value',
-      html: stripHeavy(html),
-      baseUrl: baseUrl,
-      value: value,
-      attribute: attribute || 'text'
-    });
-    scheduleOffscreenClose();
-    return resp;
+    // 同 queryElementValue：关闭必须放在 finally。catch 走 null 是"这次自愈
+    // 没成功，下次检查再试"，但 offscreen 文档的生命周期不能跟着这次失败
+    // 一起被忘掉。
+    try {
+      return await chrome.runtime.sendMessage({
+        type: 'find-by-value',
+        html: stripHeavy(html),
+        baseUrl: baseUrl,
+        value: value,
+        attribute: attribute || 'text'
+      });
+    } finally {
+      scheduleOffscreenClose();
+    }
   } catch (err) {
     console.warn('[333 Watcher] findElementByValue failed:', err.message);
     return null;
@@ -1873,7 +1885,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.46)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.47)');
 
 
 
