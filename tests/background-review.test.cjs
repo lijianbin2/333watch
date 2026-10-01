@@ -90,6 +90,14 @@ const chrome = {
     create: (_id, _options, callback) => { notificationCount += 1; callback('test-notification'); },
     clear: async () => true,
   },
+  tabs: {
+    // 记录被点开的地址：通知点击处理器唯一的副作用就是开标签页，
+    // 没有它就没法断言"点了提醒真的会跳转"。
+    created: [],
+    create: async (opts) => { chrome.tabs.created.push(opts && opts.url); return { id: 900 + chrome.tabs.created.length }; },
+    query: async () => [{ id: 1, url: 'https://active.test/' }],
+    sendMessage: async () => undefined,
+  },
   storage: {
     sync: {
       get: async (key) => {
@@ -1702,6 +1710,71 @@ async function test() {
   );
   chrome.storage.sync.get = realSyncGetForAlarm;
   process.off('unhandledRejection', onAlarmUnhandled);
+
+  // ---------------- 点开提醒必须能跳转，且失败不得逃逸 ----------------
+  // onClicked 是整段 async 监听器：里面有 getMonitors()、find()、startsWith()、
+  // chrome.tabs.create() 和 notifications.clear()。旧实现整条链裸挂，
+  // 任何一步 reject 都变成一条无上下文的 unhandledRejection —— 用户看到的是
+  // "点了提醒页面不跳转、通知也不消失"，却完全看不出是哪一步失败。
+  syncStore.set('monitors', [
+    { id: 'click-me', name: 'm', url: 'https://clicked.test/page', type: 'page', interval: 60 },
+  ]);
+  chrome.tabs.created.length = 0;
+  const realClearForClick = chrome.notifications.clear;
+  const clearedForClick = [];
+  chrome.notifications.clear = async (id) => { clearedForClick.push(id); return true; };
+
+  const clickUnhandled = [];
+  const onClickUnhandled = (reason) => clickUnhandled.push(reason);
+  process.on('unhandledRejection', onClickUnhandled);
+
+  // 正常路径：解析出监控 id → 打开对应页面 → 清掉通知。
+  for (const fn of listeners.notifications) await fn('notif-click-me');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    chrome.tabs.created,
+    ['https://clicked.test/page'],
+    'clicking a notification must open that monitor\'s page'
+  );
+  assert.ok(
+    clearedForClick.includes('notif-click-me'),
+    'clicking a notification must also dismiss it: ' + JSON.stringify(clearedForClick)
+  );
+
+  // 非监控前缀的提醒（元素点选 / 测试面板）只清不跳转。
+  chrome.tabs.created.length = 0;
+  clearedForClick.length = 0;
+  for (const fn of listeners.notifications) await fn('notif-picked-abc');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(chrome.tabs.created, [], 'a picked-element reminder must not open a tab');
+  assert.ok(clearedForClick.includes('notif-picked-abc'), 'a picked-element reminder must still be dismissed');
+
+  // 读不到监控列表时安静放弃：不许开错页面，也不许抛出无上下文的 rejection。
+  // 这是"读失败"与"真的没有这条监控"必须区分开的场景 —— 后者静默返回是对的。
+  chrome.tabs.created.length = 0;
+  clearedForClick.length = 0;
+  const realSyncGetForClick = chrome.storage.sync.get;
+  chrome.storage.sync.get = async (key) => {
+    if (key === null || key === undefined) return realSyncGetForClick(key);
+    throw new Error('sync storage unavailable during notification click');
+  };
+  for (const fn of listeners.notifications) await fn('notif-click-me');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    clickUnhandled.length,
+    0,
+    'the notification click listener must not let a failing monitor list read escape: ' +
+      clickUnhandled.map(String).join(' | ')
+  );
+  assert.deepEqual(
+    chrome.tabs.created,
+    [],
+    'an unreadable monitor list must not open a tab, since the target URL cannot be trusted'
+  );
+
+  chrome.storage.sync.get = realSyncGetForClick;
+  chrome.notifications.clear = realClearForClick;
+  process.off('unhandledRejection', onClickUnhandled);
 
   // ---------------- 读不到去重账本时绝不能覆盖它 ----------------
   // deliveredEvents 是整键读-改-写。旧实现里 getDeliveredEvents() 把读失败

@@ -2137,15 +2137,15 @@ setTimeout(() => { try { ensurePruneAlarm(); } catch {} }, 1000);
 // ================= 启动补检 =================
 // Chrome 启动时：超过 nextCheckTime 的任务立即检查（关机期间不重置计时）
 async function catchUpChecks() {
-      // 读监控列表失败时直接放弃本轮补检（下面的逐个隔离也救不了）：
-      // 监听器本身必须兜底，否则是一条无上下文的 rejection。
-      let monitors;
-      try {
-        monitors = await getMonitors();
-      } catch (err) {
-        console.error('[333 Watcher] catch-up check list read failed:', err && err.message);
-        return;
-      }
+  // 读监控列表失败时直接放弃本轮补检（下面的逐个隔离也救不了）：
+  // 监听器本身必须兜底，否则是一条无上下文的 rejection。
+  let monitors;
+  try {
+    monitors = await getMonitors();
+  } catch (err) {
+    console.error('[333 Watcher] catch-up check list read failed:', err && err.message);
+    return;
+  }
   const now = Date.now();
   for (const m of monitors) {
     const next = Number(m.nextCheckTime) || 0;
@@ -2164,7 +2164,7 @@ async function catchUpChecks() {
 }
 
 chrome.runtime.onStartup.addListener(async () => {
-      await runLifecycleStep('onStartup catchUpChecks', catchUpChecks);
+  await runLifecycleStep('onStartup catchUpChecks', catchUpChecks);
 });
 
 
