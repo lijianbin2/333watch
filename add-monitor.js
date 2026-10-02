@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.51 - 监控增删改与导入)
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.50 - 监控增删改与导入)
  *
  * 监控类型：
  * - page：整个网页变化（整页 hash）

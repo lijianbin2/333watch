@@ -4,7 +4,7 @@
 
 项目地址：<https://github.com/lijianbin2/333watch>
 
-当前版本：**v0.6.51**
+当前版本：**v0.6.50**
 
 Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 
@@ -236,9 +236,6 @@ Chrome Web Store 扩展 ID：`gaakbhfclmmeholfdahnpkocdipijndo`
 ├─ offscreen.html
 ├─ offscreen.js
 ├─ icons/
-├─ store/
-│  ├─ description.zh_CN.txt   # Chrome 商店「描述」字段正文，需手动粘贴
-│  └─ README.md
 ├─ tests/
 │  ├─ add-monitor-review.test.cjs
 │  └─ background-review.test.cjs
@@ -255,49 +252,30 @@ git diff --check
 
 ### 打包
 
-发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试。实际打包请直接跑脚本，
-文件清单以 `scripts/package.ps1` 为准：
+发布包只应包含扩展运行文件，不应包含 `.git`、凭据或测试：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\package.ps1
+$version = "0.6.50"
+$zip = "..\333-watcher-$version.zip"
+$files = @(
+  ".gitignore",
+  "add-monitor.css",
+  "add-monitor.html",
+  "add-monitor.js",
+  "background.js",
+  "icons",
+  "manifest.json",
+  "offscreen.html",
+  "offscreen.js",
+  "picker.js",
+  "PRIVACY.md",
+  "README.md"
+)
+Compress-Archive -Path $files -DestinationPath $zip -CompressionLevel Optimal -Force
+tar -tf $zip
 ```
 
-脚本会把 `store/` 一并打进 zip。**注意这不代表商店文案会自动生效** —— 商店描述只从
-开发者后台的表单字段读取，详见 [`store/README.md`](store/README.md)。
-
-### 商店文案
-
-提交到 Chrome Web Store 的描述正文放在 [`store/description.zh_CN.txt`](store/description.zh_CN.txt)，
-随代码一起改、一起 review、一起打包。每次更新仍需手动粘贴到开发者后台：
-
-1. 打开 https://chrome.google.com/webstore/devconsole/
-2. 进入 **333 Watcher** → 商店详情 → 描述
-3. 全选并粘贴 `store/description.zh_CN.txt` 的内容，保存并提交审核
-
-Chrome Web Store API 曾提供 `items/{id}/listings` 端点用于程序化读写文案，但实测
-v1.1 路径已被 Google 下线、v2 对本 publisher 返回 404，因此没有可用的自动同步通道。
-
 ## 更新日志
-
-### v0.6.51
-
-- 把商店文案纳入仓库与发布包，并修好一直跑不通的商店查询脚本。
-  - 新增 `store/description.zh_CN.txt`：提交到 Chrome Web Store 的「描述」正文，
-    `scripts/package.ps1` 会把 `store/` 一并打进 zip。文案从此与代码同版本、
-    同 git 历史，改功能时能一起 review 差异，不再是躺在仓库外的孤立文件。
-  - 需要说明：**打进 zip 不等于自动同步到商店**。商店描述只从开发者后台的表单
-    字段读取，Chrome 不会解析包内的文本文件，仍需手动粘贴一次。
-  - 新增 `store/README.md` 写清粘贴步骤、改文案的注意事项（纯文本、不要写版本号、
-    与 `PRIVACY.md` 保持一致）。
-  - `README.md` 的「文件结构」补上 `store/`，「打包」章节改为直接调用
-    `scripts/package.ps1`（原先内联的文件清单已和脚本不同步），并新增「商店文案」小节。
-  - 顺带修好两个本地工具脚本（均在仓库外，不影响扩展本体）：
-    - `cws-status.mjs`：原先打 v2 的 `items/{id}` 端点，本 publisher 恒返回 404，
-      完全无法查询。改用实测可用的 `v1.1 items/{id}?projection=DRAFT`，
-      现在能正常读到当前版本与待上传状态。
-    - `cws-listing.mjs`：原先同样打已失效的 listings 端点，只会抛出一坨 HTML
-      错误页。已确认 Google 下线了 v1.1 的 `items/{id}/listings`、v2 对本 publisher
-      也 404，故改为明确提示改走后台手动粘贴，不再误导为可自动同步。
 
 ### v0.6.50
 

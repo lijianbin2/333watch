@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$version = '0.6.51'
+$version = '0.6.50'
 $root = Split-Path -Parent $PSScriptRoot
 $zip = Join-Path (Split-Path -Parent $root) "333-watcher-$version.zip"
 $files = @(
@@ -14,8 +14,7 @@ $files = @(
   'offscreen.js',
   'picker.js',
   'PRIVACY.md',
-  'README.md',
-  'store'
+  'README.md'
 )
 Push-Location $root
 try {
