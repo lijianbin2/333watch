@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.49 - 安装/启动链路逐步兜底)
+ * 333 Watcher - Background Service Worker (v0.6.50 - 安装/启动链路逐步兜底)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -73,6 +73,86 @@ function clampInterval(value, fallback) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return fallback || DEFAULT_INTERVAL;
   return Math.min(10080, Math.max(1, Math.round(n)));
+}
+
+// ---------------- 抖动判定 ----------------
+// 连续多少轮判成抖动后，若"剥掉易变参数"的稳定身份确实变了，就按真实变化放行。
+const FLACKY_STREAK_NOTIFY = 3;
+// 收录标准只有一条：**该键每次请求都会变**。签名、时效、时间戳、随机数满足；
+// 刻意不收录 v / ver / version / rev / build —— "?v=2.0" 恰恰是用户最常监控的
+// 版本号，剥掉它会把真实升级当成抖动吞掉，那正是本函数要修的漏报。
+// checksum / hash / etag / ifetag 同样不收录：它们是**内容标识**，资源一更新
+// 就会跟着变。收录它们等于让"带 checksum 的下载链接"重演本次要修的漏报。
+const VOLATILE_QUERY_KEYS = new Set([
+  'sig', 'signature', 'hmac',
+  'policy', 'key-pair-id', 'expires', 'expire', 'expiry',
+  'nonce', 'rand', 'random', 'cb', 'cache', 'cachebust', 'nocache',
+  'timestamp', 'ts', '_t', '_', 'rand_',
+  // Azure Blob SAS
+  'se', 'sp', 'sv', 'sr', 'st'
+]);
+// 云厂商签名前缀（X-Amz-*/X-Goog-*/X-Oss-*）整段都是易变凭证。
+const VOLATILE_QUERY_PREFIX = /^(x-amz-|x-goog-|x-oss-)/i;
+// 只有 9~17 位、且达到 1973 年的纯数字才当时间戳：?t=1700000000 是缓存击穿，
+// ?t=2 是版本/期次。裸 t 因此不在上表里，改由这条规则按值判断。
+const EPOCH_MIN = 1e8;
+function looksLikeEpochValue(value) {
+  const s = String(value == null ? '' : value).trim();
+  return /^\d{9,17}$/.test(s) && Number(s) >= EPOCH_MIN;
+}
+
+/**
+ * 剥掉每次请求都会变的参数后的"稳定身份"。
+ *
+ * confirmChange 原本直接比较两次抓取的整串 URL。CDN 签名链接、缓存击穿参数、
+ * A-B 分桶每次请求都会换 token，两次抓取永远不相等，于是每一轮都被判成抖动
+ * 并抑制通知 —— 下载地址真的换了版本也一条提醒都发不出去。更糟的是抖动分支
+ * 会把基线回写成第二次抓到的值，下一轮必然又"变化"又"抖动"，形成永久循环。
+ *
+ * 判定必须落在稳定身份上：身份相同 = 只是 token 抖动，维持抑制；身份不同 =
+ * 版本真的换了，必须放行。非 URL 值（文本监控）原样返回。
+ */
+function stableValueIdentity(value, attribute) {
+  const raw = value == null ? '' : String(value);
+  if (attribute !== 'href' && attribute !== 'src') return raw;
+  let u;
+  try { u = new URL(raw); } catch { return raw; }
+  // fragment 绝不剥掉：SPA 的 hash 路由（#/v/1.0 -> #/v/2.0）和锚点变体
+  // （#linux -> #windows）的变化只存在于 fragment 里。剥掉它与剥掉 ?v= 是
+  // 同一类错误 —— 都让"地址真的变了"重新变成"检测不到变化"。
+  const kept = [];
+  for (const [k, v] of u.searchParams) {
+    const key = String(k).toLowerCase();
+    if (VOLATILE_QUERY_KEYS.has(key) || VOLATILE_QUERY_PREFIX.test(k)) continue;
+    if (key === 't' && looksLikeEpochValue(v)) continue;
+    kept.push([k, v]);
+  }
+  // 参数顺序不同不算变化（?a=1&b=2 与 ?b=2&a=1 是同一个地址）。
+  kept.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : 1));
+  u.search = '';
+  for (const [k, v] of kept) u.searchParams.append(k, v);
+  return u.href;
+}
+
+/** 本次检查用于比较的 URL 属性：link/download 恒为 href。 */
+function valueAttributeOf(monitor) {
+  const type = (monitor && monitor.type) || 'page';
+  if (type === 'link' || type === 'download') return 'href';
+  return (monitor && monitor.attribute) || 'text';
+}
+
+/**
+ * 监控值是否真的变了。
+ *
+ * 检测和二次确认必须用同一把尺子。以前检测比整串、二次确认也比整串，看似一致，
+ * 但把 CDN 签名 / 缓存击穿 / A-B 分桶这类"每次请求 URL 都不同"的页面判成抖动后，
+ * 抖动分支又会把基线推到最新抓到的值，于是每轮都是"变化 + 抖动"，
+ * 提醒被无限期抑制（漏报）。只改确认环节则反过来变成每轮都提醒（误报）。
+ *
+ * 两处统一走稳定身份：token 变了但地址没变 -> 不是变化；版本变了 -> 是变化。
+ */
+function sameMonitoredValue(a, b, attribute) {
+  return stableValueIdentity(a, attribute) === stableValueIdentity(b, attribute);
 }
 
 function nextEventSequence(value) {
@@ -698,7 +778,7 @@ async function checkLink(monitor, html) {
 
   const currentHref = limitMonitorValue(target.href, 'href');
   const lastValue = monitor.lastValue == null ? null : limitMonitorValue(monitor.lastValue, 'href');
-  const changed = lastValue !== null && currentHref !== lastValue;
+  const changed = lastValue !== null && !sameMonitoredValue(currentHref, lastValue, 'href');
   dbg('[333 Watcher] [link] lastValue:', lastValue, 'currentHref:', currentHref, 'changed:', changed);
   return { changed, prevValue: lastValue, baseValue: lastValue, baseField: 'lastValue', update: { lastValue: currentHref } };
 }
@@ -735,7 +815,7 @@ async function checkElement(monitor, html) {
   if (lastValue !== null && lastValue.length === 120 && current.startsWith(lastValue)) {
     return { changed: false, prevValue: lastValue, baseValue: lastValue, baseField: 'lastValue', update: { lastValue: current } };
   }
-  const changed = lastValue !== null && current !== lastValue;
+  const changed = lastValue !== null && !sameMonitoredValue(current, lastValue, attribute);
   dbg('[333 Watcher] [element] selector:', monitor.selector);
   dbg('[333 Watcher] [element] attribute:', attribute);
   dbg('[333 Watcher] [element] lastValue:', lastValue);
@@ -804,12 +884,36 @@ async function confirmChange(monitor, newValue) {
       dbg('[333 Watcher] confirm: element not found on re-fetch, keep notification');
       return { stable: true, value: newValue };
     }
-    const stable = cur.value === newValue;
+    // 比较稳定身份而不是整串：CDN 签名 / 缓存击穿 / A-B 分桶会让每次请求的
+    // URL 都不同，整串比较会把每一次真实升级都误判成抖动并永久抑制提醒。
+    const attr = valueAttributeOf(monitor);
+    const stable = stableValueIdentity(cur.value, attr) === stableValueIdentity(newValue, attr);
     dbg('[333 Watcher] confirm: first =', newValue, ' second =', cur.value, ' stable =', stable);
     return { stable: stable, value: cur.value };
   } catch (err) {
     console.warn('[333 Watcher] confirm fetch failed:', err.message);
     return { stable: true, value: newValue };
+  }
+}
+
+/**
+ * 归零"连续抖动"计数。
+ *
+ * 安全网只在连续 FLACKY_STREAK_NOTIFY 轮不稳定时才放行，所以计数必须严格对应
+ * 连续性：任何一次"确认了变化并发出通知"或"本轮没变化"都意味着抖动循环结束。
+ * 已经是 0 时直接跳过 mutate —— 写一个 0 也要走 sync 配额，不值得。
+ */
+async function resetFlakyRounds(monitorId) {
+  try {
+    await mutateMonitors((list) => {
+      const idx = list.findIndex((m) => m.id === monitorId);
+      if (idx === -1) return false;
+      if (!(Number(list[idx].flakyRounds) > 0)) return false;
+      list[idx] = { ...list[idx], flakyRounds: 0 };
+      return true;
+    });
+  } catch (err) {
+    console.error('[333 Watcher] flaky counter reset failed:', monitorId, err && err.message);
   }
 }
 
@@ -1005,7 +1109,11 @@ async function checkMonitor(monitor) {
         invalid: false,
         invalidReason: '',
         invalidSince: null,
-        baselined: true
+        baselined: true,
+        // 只有"本轮没变化"才说明抖动循环真的结束了。
+        // 本轮判定为变化的监控还没走完 confirmChange：它可能被判成抖动，
+        // 计数必须保留下来，否则抖动分支每轮都读到 0，安全网永远不触发。
+        flakyRounds: outcome.changed ? (Number(list[idx].flakyRounds) || 0) : 0
       };
       saved = list[idx];
       return true;
@@ -1037,8 +1145,11 @@ async function checkMonitor(monitor) {
       if (!confirmRes.stable) {
         dbg('[333 Watcher] value unstable between two fetches, notification suppressed');
         // 抖动回写的基线同样要走互斥区，否则会覆盖这期间的其他改动。
+        // 放行阈值必须用**实际落盘的值**：基线已被别的设备推进时我们并不拥有
+        // 这一轮抖动，拿过期计数凑够阈值会放行一条本不该发的通知。
+        let writtenFlaky = 0;
         try {
-          await mutateMonitors((list) => {
+          const w = await mutateMonitors((list) => {
             const idx = list.findIndex((m) => m.id === monitor.id);
             if (idx === -1) return false;
             // 只有基线仍是本轮刚写入的那个值时才回写：二次抓取期间别的设备/轮次
@@ -1049,11 +1160,31 @@ async function checkMonitor(monitor) {
               dbg('[333 Watcher] flaky baseline superseded, skip write-back:', monitor.url);
               return false;
             }
-            list[idx] = { ...list[idx], lastValue: confirmRes.value };
+            writtenFlaky = (Number(list[idx].flakyRounds) || 0) + 1;
+            list[idx] = {
+              ...list[idx],
+              lastValue: confirmRes.value,
+              // 连续抖动计数：抖动分支每轮都会把基线推到最新抓到的值，
+              // 于是"下一次必然又变化"。若这套循环一直停不下来，说明变化是真实
+              // 且持续的（只是我们没能把它归因成某一种抖动），必须放行提醒，
+              // 否则用户永远等不到这条通知。
+              flakyRounds: writtenFlaky
+            };
             return true;
           });
+          if (!w.saved) writtenFlaky = 0;
         } catch (err) {
           console.error('[333 Watcher] flaky baseline save failed:', monitor.id, err && err.message);
+          writtenFlaky = 0;
+        }
+        if (writtenFlaky >= FLACKY_STREAK_NOTIFY) {
+          dbg('[333 Watcher] change stayed unstable for', writtenFlaky, 'rounds, notifying anyway:', monitor.url);
+          await resetFlakyRounds(monitor.id);
+          await safeNotify('change', saved, {
+            oldValue: outcome.prevValue,
+            newValue: confirmRes.value
+          });
+          return 'changed';
         }
         return 'flaky';
       }
@@ -1062,6 +1193,9 @@ async function checkMonitor(monitor) {
       oldValue: outcome.prevValue,
       newValue: outcome.update.lastValue
     });
+    // 本轮真的确认并通知了，抖动循环到此结束：计数必须归零，否则历史上抖过
+    // 的监控会在下一次无关的单次抖动上直接越过阈值，白发一条通知。
+    await resetFlakyRounds(monitor.id);
     return 'changed';
   }
   return 'unchanged';
@@ -1946,7 +2080,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.49)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.50)');
 
 
 

@@ -1003,6 +1003,194 @@ async function test() {
     'a flaky write-back must not roll the baseline back over a newer value'
   );
 
+  // ---- 签名链接：token 每次都变时，真实升级必须仍然提醒 ----
+  // 用户实测反馈"地址变了但没发通知"。根因：检测和二次确认都按整串 URL 比较，
+  // 而 CDN 签名 / 缓存击穿 / A-B 分桶每次请求都会换 token，两次抓取永不相等。
+  // 于是每轮都判成抖动，抖动分支又把基线推到最新抓到的值 —— 下一轮必然又
+  // "变化"又"抖动"，提醒被无限期抑制，地址真的换了版本也一条都发不出去。
+  // 现在检测与确认统一按"剥掉易变参数后的稳定身份"比较。
+  const freshOf = () => plain(syncStore.get('monitors')[0]);
+  const signedMonitor = {
+    id: 'dl-signed',
+    name: 'signed',
+    url: 'https://example.test/download',
+    type: 'download',
+    interval: 5,
+    targetText: 'Download',
+    lastValue: 'https://cdn.test/pkg-1.0.zip?sig=aaa&_t=1000',
+    baselined: true,
+    eventSeq: 1,
+  };
+  // 每次抓取都换 sig / _t，版本号则是真正被监控的东西。
+  const signedFetch = (version) => {
+    let n = 0;
+    return async () => {
+      n += 1;
+      const html = `<html><body><a href="https://cdn.test/pkg-${version}.zip?sig=s${n}&_t=${1000 + n}">Download</a></body></html>`;
+      return { ok: true, status: 200, headers: { get: () => '0' }, body: null, text: async () => html };
+    };
+  };
+
+  // 先锁住反向风险：只有 token 在变、版本没变时，绝不能提醒。
+  syncStore.clear();
+  notificationCount = 0;
+  context.__setFetch(signedFetch('1.0'));
+  syncStore.set('monitors', [{ ...signedMonitor }]);
+  await context.checkMonitor(freshOf());
+  notificationCount = 0;
+  const jitterOnly = [];
+  for (let i = 0; i < 4; i++) jitterOnly.push(await context.checkMonitor(freshOf()));
+  assert.equal(notificationCount, 0, 'a rotating signature token alone must never notify');
+  assert.ok(
+    jitterOnly.every((r) => r === 'unchanged'),
+    'token-only churn must read as unchanged every round, got: ' + jitterOnly.join(', ')
+  );
+
+  // 再锁住正向行为：版本真的升了，token 再怎么变也必须提醒，且只提醒一次。
+  syncStore.clear();
+  notificationCount = 0;
+  context.__setFetch(signedFetch('1.0'));
+  syncStore.set('monitors', [{ ...signedMonitor }]);
+  await context.checkMonitor(freshOf());
+  notificationCount = 0;
+  context.__setFetch(signedFetch('2.0'));
+  const upgradeResult = await context.checkMonitor(freshOf());
+  assert.equal(upgradeResult, 'changed', 'a real upgrade behind a rotating token must notify');
+  assert.equal(notificationCount, 1, 'the upgrade must notify exactly once');
+  // 后续轮次：token 继续变，但版本没再变，不能反复提醒。
+  const afterUpgrade = [];
+  for (let i = 0; i < 3; i++) afterUpgrade.push(await context.checkMonitor(freshOf()));
+  assert.equal(
+    notificationCount,
+    1,
+    'token churn after the upgrade must not re-notify, got ' + notificationCount + ' notifications'
+  );
+  assert.ok(
+    afterUpgrade.every((r) => r === 'unchanged'),
+    'post-upgrade token churn must stay quiet, got: ' + afterUpgrade.join(', ')
+  );
+
+  // 版本号参数绝不能被当成易变参数剥掉 —— "?v=2.0" 恰恰是用户最常监控的东西。
+  assert.notStrictEqual(
+    context.stableValueIdentity('https://x.test/f.zip?v=1.0&sig=a', 'href'),
+    context.stableValueIdentity('https://x.test/f.zip?v=2.0&sig=b', 'href'),
+    'a version query param must stay part of the stable identity'
+  );
+  assert.strictEqual(
+    context.stableValueIdentity('https://x.test/f.zip?v=1.0&sig=a', 'href'),
+    context.stableValueIdentity('https://x.test/f.zip?v=1.0&sig=b&_t=99', 'href'),
+    'signature and cache-busting params must be stripped from the stable identity'
+  );
+  // fragment 绝不剥：SPA 的 hash 路由和锚点变体的变化只存在于 fragment 里。
+  // 剥掉它与剥掉 ?v= 是同一类错误，都会让"地址真的变了"重新变成检测不到变化。
+  assert.notStrictEqual(
+    context.stableValueIdentity('https://app.test/#/v/1.0', 'href'),
+    context.stableValueIdentity('https://app.test/#/v/2.0', 'href'),
+    'an SPA hash-route change must stay visible in the stable identity'
+  );
+  assert.notStrictEqual(
+    context.stableValueIdentity('https://x.test/dl#linux', 'href'),
+    context.stableValueIdentity('https://x.test/dl#windows', 'href'),
+    'an anchor-only change must stay visible in the stable identity'
+  );
+  // checksum / hash / etag 是内容标识，资源一更新就变，必须留在身份里。
+  for (const key of ['checksum', 'hash', 'etag', 'ifetag']) {
+    assert.notStrictEqual(
+      context.stableValueIdentity('https://x.test/f.zip?' + key + '=aaa', 'href'),
+      context.stableValueIdentity('https://x.test/f.zip?' + key + '=bbb', 'href'),
+      key + ' is a content identifier and must not be stripped as a volatile credential'
+    );
+  }
+  // 裸 t 按值判断：epoch 量级是缓存击穿，短数字是版本/期次。
+  assert.notStrictEqual(
+    context.stableValueIdentity('https://x.test/f.zip?t=1', 'href'),
+    context.stableValueIdentity('https://x.test/f.zip?t=2', 'href'),
+    'a short t value is a version marker and must stay in the stable identity'
+  );
+  assert.strictEqual(
+    context.stableValueIdentity('https://x.test/f.zip?t=1700000000', 'href'),
+    context.stableValueIdentity('https://x.test/f.zip?t=1700000001', 'href'),
+    'an epoch-scale t value is a cache buster and must be stripped'
+  );
+
+  // ---- 抖动安全网：连续多轮不稳定后必须放行，且放行后归零 ----
+  // 这是"漏报"的最后一道防线：易变参数表是白名单，厂商私有签名参数
+  // （随机串 ?a1b2c3 之类）不在表内，只有靠这条安全网兜住。
+  // 每轮两次抓取稳定身份都不同 -> confirmChange 判不稳定 -> 抑制。
+  const unstableFetch = () => {
+    let n = 0;
+    return async () => {
+      n += 1;
+      // 每次都换一整段随机串：白名单剥不掉，只能靠安全网。
+      const html = `<html><body><a href="https://cdn.test/pkg-1.0.zip?r=${n}x${n * 7}y${n * 13}">Download</a></body></html>`;
+      return { ok: true, status: 200, headers: { get: () => '0' }, body: null, text: async () => html };
+    };
+  };
+  const altMonitor = {
+    id: 'dl-unstable',
+    name: 'unstable',
+    url: 'https://example.test/unstable',
+    type: 'download',
+    interval: 5,
+    targetText: 'Download',
+    lastValue: 'https://cdn.test/pkg-1.0.zip?r=seed',
+    baselined: true,
+    eventSeq: 1,
+  };
+
+  // 前两轮必须保持沉默（抖动未达阈值），第三轮才放行。
+  syncStore.clear();
+  notificationCount = 0;
+  context.__setFetch(unstableFetch());
+  syncStore.set('monitors', [{ ...altMonitor }]);
+  const unstableRounds = [];
+  for (let i = 0; i < 3; i++) unstableRounds.push(await context.checkMonitor(freshOf()));
+  assert.deepEqual(
+    unstableRounds,
+    ['flaky', 'flaky', 'changed'],
+    'the streak safety net must stay quiet below the threshold and notify at it, got: ' + unstableRounds.join(', ')
+  );
+  assert.equal(notificationCount, 1, 'the safety net must notify exactly once, got ' + notificationCount);
+  // 放行后计数归零，下一轮重新从 1 开始，不得连续放行。
+  syncStore.clear();
+  notificationCount = 0;
+  context.__setFetch(unstableFetch());
+  syncStore.set('monitors', [{ ...altMonitor }]);
+  const afterNet = [];
+  for (let i = 0; i < 3; i++) afterNet.push(await context.checkMonitor(freshOf()));
+  assert.deepEqual(
+    afterNet,
+    ['flaky', 'flaky', 'changed'],
+    'the counter must restart from zero after the safety net fires, got: ' + afterNet.join(', ')
+  );
+  assert.equal(notificationCount, 1, 'the safety net must not fire on consecutive rounds, got ' + notificationCount);
+
+  // 真实变化确认并通知后，计数必须归零 —— 否则历史上抖过的监控会在下一次
+  // 单次抖动上直接越过阈值，白发一条通知。
+  syncStore.clear();
+  notificationCount = 0;
+  context.__setFetch(unstableFetch());
+  syncStore.set('monitors', [{ ...altMonitor }]);
+  await context.checkMonitor(freshOf()); // flaky -> flakyRounds=1
+  await context.checkMonitor(freshOf()); // flaky -> flakyRounds=2
+  const flakyBefore = plain(syncStore.get('monitors')[0]).flakyRounds;
+  assert.equal(flakyBefore, 2, 'two consecutive unstable rounds must accumulate, got ' + flakyBefore);
+  // 第三轮改用稳定内容：确认成功并通知，计数必须清零。
+  context.__setFetch(async () => ({
+    ok: true, status: 200, headers: { get: () => '0' }, body: null,
+    text: async () => '<html><body><a href="https://cdn.test/pkg-9.9.zip">Download</a></body></html>',
+  }));
+  const settled = await context.checkMonitor(freshOf());
+  assert.equal(settled, 'changed', 'a stable real change must notify, got ' + settled);
+  assert.equal(plain(syncStore.get('monitors')[0]).flakyRounds, 0,
+    'a successful notification must reset the flaky streak counter');
+  // 计数已归零：再来一次单轮抖动不得放行。
+  notificationCount = 0;
+  context.__setFetch(unstableFetch());
+  const oneFlaky = await context.checkMonitor(freshOf());
+  assert.equal(oneFlaky, 'flaky', 'a single unstable round after a reset must stay suppressed, got ' + oneFlaky);
+  assert.equal(notificationCount, 0, 'a reset counter must not notify on the next single flaky round');
+
   // ---- 启动补检：单个监控抛错不得中断其余监控的补检 ----
   // 通知链路里任何一次 history 写入失败（配额/离线）都会让 notifyOnce reject，
   // 而 checkMonitor 没有兜底 catch，异常会一路冒泡出 catchUpChecks 的 for 循环，
