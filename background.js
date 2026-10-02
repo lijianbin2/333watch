@@ -1,5 +1,5 @@
 /**
- * 333 Watcher - Background Service Worker (v0.6.50 - 安装/启动链路逐步兜底)
+ * 333 Watcher - Background Service Worker (v0.6.51 - 安装/启动链路逐步兜底)
  *
  * 监控类型：
  * - page：整页 HTML hash 对比
@@ -2080,7 +2080,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-  dbg('[333 Watcher] Background service worker loaded (v0.6.50)');
+  dbg('[333 Watcher] Background service worker loaded (v0.6.51)');
 
 
 
