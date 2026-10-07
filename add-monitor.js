@@ -1,1515 +1,1680 @@
-/**
- * 333 Watcher - Add Monitor 页面逻辑 (v0.6.50 - 监控增删改与导入)
- *
- * 监控类型：
- * - page：整个网页变化（整页 hash）
- * - element：指定内容变化（CSS selector + 属性 text/href）
- *
- * 兼容：
- * - 旧 type="link" 由 background 迁移为 type="element" + attribute="href"（v0.6.12 已移除 src 图片监控）
- */
-
-const form = document.getElementById('monitor-form');
-const inputType = document.getElementById('input-type');
-const inputAttribute = document.getElementById('input-attribute');
-let currentAttribute = 'text';
-function getSelectedAttribute() {
-  if (pickedElement && pickedElement.attribute) return pickedElement.attribute;
-  if (inputAttribute && inputAttribute.value) return inputAttribute.value;
-  return currentAttribute;
-}
-function setSelectedAttribute(val) {
-  const v = (val === 'src' ? 'text' : (val || 'text'));
-  currentAttribute = v;
-  if (pickedElement) pickedElement.attribute = v;
-  if (inputAttribute) inputAttribute.value = v;
-}
-const inputName = document.getElementById('input-name');
-const inputUrl = document.getElementById('input-url');
-const inputInterval = document.getElementById('input-interval');
-const submitBtn = document.getElementById('submit-btn');
-const statusMsg = document.getElementById('status-msg');
-const listEl = document.getElementById('monitor-list');
-const countEl = document.getElementById('monitor-count');
-const syncBadge = document.getElementById('sync-badge');
-const unreadBadge = document.getElementById('unread-badge');
-
-const editingBanner = document.getElementById('editing-banner');
-const cancelEditBtn = document.getElementById('cancel-edit-btn');
-const overwriteConfirm = document.getElementById('overwrite-confirm');
-const confirmOverwriteBtn = document.getElementById('confirm-overwrite-btn');
-const cancelOverwriteBtn = document.getElementById('cancel-overwrite-btn');
-
-const elementSection = document.getElementById('element-section');
-const pickElementBtn = document.getElementById('pick-element-btn');
-const pickedInfo = document.getElementById('picked-info');
-
-const notifyCard = document.getElementById('notify-card');
-const notifyDot = document.getElementById('notify-dot');
-const notifySummary = document.getElementById('notify-summary');
-const markAllReadBtn = document.getElementById('mark-all-read-btn');
-const clearReadBtn = document.getElementById('clear-read-btn');
-const historyToggle = document.getElementById('history-toggle');
-const historyList = document.getElementById('history-list');
-const historyArrow = document.getElementById('history-arrow');
-const bulkIntervalBtn = document.getElementById('bulk-interval-btn');
-
-const hasChromeStorage = typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync;
-// pendingPick 是本机一次性交接状态，不参与同步（见 picker.js 里的说明），
-// 所以单独判断 local，别让它跟着 sync 的探测结果走。
-const hasLocalStorage = typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local;
-const hasTabsApi = typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query;
-const hasScripting = typeof chrome !== 'undefined' && chrome.scripting && chrome.scripting.executeScript;
-const DEFAULT_INTERVAL = 500;
-const INVALID_THRESHOLD = 2;
-const MAX_TEXT_VALUE_CHARS = 4096;
-const MAX_URL_VALUE_CHARS = 2048;
-
-// ---- 状态 ----
-let editingId = null;
-let pickedElement = null;   // { selector, attribute, text, href, pageUrl, pageTitle, tagName }
-let historyExpanded = false;
-
-const DEBUG = false; // 发布版关闭信息日志，调试时改为 true
-function dbg(...args) { if (DEBUG) console.log(...args); }
-
-const ALARM_PREFIX = 'monitor-'; // 与 background.js 保持一致，删除监控时清理 alarm
-
-// ---- 同步状态显示 ----
-function renderSyncBadge() {
-  if (hasChromeStorage) {
-    syncBadge.textContent = 'Chrome 同步：已启用';
-    syncBadge.classList.remove('offline');
-  } else {
-    syncBadge.textContent = '本地预览模式';
-    syncBadge.classList.add('offline');
-  }
-}
-
-// ---- URL 规范化 ----
-function normalizeUrl(url) {
-  return (url || '').trim().replace(/\/+$/, '');
-}
-
-function monitorKey(monitor) {
-  const url = normalizeUrl(monitor && monitor.url || '');
-  const type = (monitor && monitor.type) || 'page';
-  if (type === 'page') return 'page|' + url;
-  const selector = (monitor && monitor.selector) || '';
-  const attribute = (monitor && monitor.attribute) || 'text';
-  // 旧版链接监控没有 selector，区分目标全靠 targetHref/targetText。
-  // 少了这一段，同一页面上两条指向不同下载地址的旧监控会撞成同一个 key，
-  // 导入时被后者覆盖 —— 用户备份里的监控凭空少一条。
-  if (!selector) {
-    return 'element|' + url + '|' + (monitor.targetHref || '') + '|' + (monitor.targetText || '') + '|' + attribute;
-  }
-  return 'element|' + url + '|' + selector + '|' + attribute;
-}
-
-function clampInterval(value, fallback) {
-  const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) return fallback || DEFAULT_INTERVAL;
-  return Math.min(10080, Math.max(1, Math.round(n)));
-}
-
-function limitMonitorValue(value, attribute) {
-  const text = value == null ? '' : String(value);
-  const max = attribute === 'href' || attribute === 'src' ? MAX_URL_VALUE_CHARS : MAX_TEXT_VALUE_CHARS;
-  return text.length > max ? text.slice(0, max) : text;
-}
-
-// id 同时充当 alarm 名、通知 id 和检查锁的键，所以一旦重复：
-//   - 两条监控共用一个 alarm，syncAlarms 只建得出一个 → 其中一条再也不会被检查；
-//   - 通知 id 相同 → 后一条直接顶掉前一条，用户看到"少了一条提醒"；
-//   - findIndex(m.id === ...) 永远只命中第一条 → 基线写到错的监控上。
-// 同一份备份可以在多台机器上与各自独立创建的监控撞 id，所以导入合并时必须
-// 过这道闸（与 background 的 ensureUniqueMonitorIds 同一套语义）。
-function ensureUniqueMonitorIds(list) {
-  const used = new Set();
-  const repaired = [];
-  for (const m of list) {
-    if (!m || typeof m !== 'object') { repaired.push(m); continue; }
-    const id = String(m.id || '');
-    if (id && !used.has(id)) {
-      used.add(id);
-      repaired.push(m);
-      continue;
-    }
-    const fresh = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    dbg('[333 Watcher] monitor id 空/重复，重新发号:', id || '(空)', '->', fresh);
-    used.add(fresh);
-    repaired.push({ ...m, id: fresh });
-  }
-  return repaired;
-}
-
-function normalizeImportedMonitor(value) {
-  if (!value || typeof value !== 'object') return null;
-  const url = normalizeUrl(value.url || '').slice(0, MAX_URL_VALUE_CHARS);
-  if (!url) return null;
-  const type = value.type === 'element' || value.type === 'link' || value.type === 'download' ? 'element' : 'page';
-  const attribute = type === 'element' ? ((value.attribute === 'href' || value.type === 'link' || value.type === 'download') ? 'href' : 'text') : '';
-  const selector = type === 'element' ? String(value.selector || '').trim() : '';
-  // 旧版链接监控没有 selector，只有 targetHref/targetText：background 的
-  // migrateData 与 checkMonitor 都为这种记录保留 checkLink 回退路径，
-  // 这里若当成无效项丢弃，用户备份里的这类监控就会静默消失。
-  const targetHref = String(value.targetHref || '').trim().slice(0, MAX_URL_VALUE_CHARS);
-  const targetText = String(value.targetText || '').trim().slice(0, 200);
-  if (selector.length > 4096) return null;
-  if (type === 'element' && !selector && !targetHref && !targetText) return null;
-  return {
-    id: String(value.id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 6))),
-    name: String(value.name || url).trim().slice(0, 60) || url,
-    url,
-    interval: clampInterval(value.interval, DEFAULT_INTERVAL),
-    type,
-    selector,
-    attribute,
-    targetHref,
-    targetText,
-    lastValue: limitMonitorValue(value.lastValue || '', attribute),
-    createdAt: value.createdAt || new Date().toISOString(),
-    updatedAt: Number(value.updatedAt) || 0,
-    lastHash: '',
-    lastCheck: '',
-    lastCheckTime: 0,
-    nextCheckTime: 0,
-    // eventSeq 参与跨设备去重的 eventKey 计算，重置成 0 会让导入后的监控
-    // 与历史里的旧事件撞上同一个 eventKey，导致该发的提醒被误吞。
-    eventSeq: Math.max(0, Number(value.eventSeq) || 0),
-    failCount: 0,
-    lastError: '',
-    invalid: false,
-    invalidReason: '',
-    invalidSince: null,
-    baselined: value.baselined !== false
-  };
-}
-
-// 把导入的监控按 monitorKey 合并进"存储里的当前列表"，并修好 id：
-//   - 命中已有 key 时保留本机 id（id 是 alarm 名 / 通知 id / 检查锁的键，
-//     换成备份里的 id 会让在途的认领和已建的 alarm 对不上）；
-//   - 整体去重 id，避免同一份备份在多台机器上与各自新建的监控撞 id。
-// 与 background 的 import-by-key 同一套语义（那边是主路径，这里是直写兜底）。
-function mergeImportedMonitors(current, normalized) {
-  const map = new Map(current.map((m) => [monitorKey(m), m]));
-  let added = 0;
-  for (const m of normalized) {
-    if (!m) continue;
-    const key = monitorKey(m);
-    const prev = map.get(key);
-    if (prev) {
-      map.set(key, { ...m, id: prev.id });
-      continue;
-    }
-    added++;
-    map.set(key, m);
-  }
-  return { merged: ensureUniqueMonitorIds([...map.values()]), added };
-}
-
-// ---- 监控存储层（chrome.storage.sync） ----
-async function getMonitors() {
-  if (hasChromeStorage) {
-    const { monitors = [] } = await chrome.storage.sync.get('monitors');
-    return Array.isArray(monitors) ? monitors : [];
-  }
-  try {
-    const parsed = JSON.parse(localStorage.getItem('monitors') || '[]');
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function storageErrorMessage(err) {
-  const message = String(err && err.message || err || '');
-  if (err && err.code === 'SYNC_QUOTA') return message;
-  if (/quota|max_write|quota_bytes|storage.*full/i.test(message)) {
-    return 'Chrome 同步存储空间不足，请删除旧监控或减少监控内容后重试';
-  }
-  return message || '同步存储失败';
-}
-
-async function saveMonitors(monitors) {
-  try {
-    // 所有页面直写都从这里出去，所以在这一道闸上统一去重 id：
-    // background 在导入合并 / 启动迁移 / 新增监控三个入口都做了这件事，
-    // 页面兜底若漏掉，同一份备份在两台机器上就会留下 id 冲突的表
-    // （两条监控共用一个 alarm、共用同一个通知 id）。顺带修掉已被写坏的状态。
-    const safe = ensureUniqueMonitorIds(monitors);
-    if (hasChromeStorage) {
-      await chrome.storage.sync.set({ monitors: safe });
-    } else {
-      localStorage.setItem('monitors', JSON.stringify(safe));
-    }
-  } catch (err) {
-    const friendly = new Error(storageErrorMessage(err));
-    friendly.code = /quota|max_write|quota_bytes|storage.*full/i.test(String(err && err.message || err)) ? 'SYNC_QUOTA' : 'STORAGE_ERROR';
-    throw friendly;
-  }
-}
-
-// monitors 整键读-改-写：popup 页面和后台是两个 JS 上下文，页面直写会整键覆盖掉后台刚写入的
-// 检查基线（丢监控 / 基线回滚 / 重复通知）。因此写入统一交给 background 串行化执行；
-// fallback 供无法与 background 通信时（如本地预览直开 html）由调用方自行直写。
-async function mutateMonitorsViaBackground(msg, fallback) {
-  if (!(hasChromeStorage && chrome.runtime && chrome.runtime.sendMessage)) {
-    // 透传 fallback 的返回值：导入兜底要靠它回报真实的新增条数，
-    // 否则会退回"全部都是新增"，把覆盖掉的条数也算成新增。
-    const local = (await fallback()) || {};
-    return { ok: true, fallback: true, ...local };
-  }
-  const res = await chrome.runtime.sendMessage({ type: 'mutate-monitors', ...msg });
-  if (!res || res.ok !== true) {
-    const err = new Error((res && res.error) || '保存监控失败');
-    err.code = (res && res.code) || 'STORAGE_ERROR';
-    throw err;
-  }
-  return res;
-}
-
-// ---- 通知历史存储层（chrome.storage.sync，跨设备同步） ----
-const HISTORY_LIMIT = 50;
-const HISTORY_MAX_BYTES = 7000; // storage.sync 单 key 上限 8KB，留出余量
-
-function utf8Bytes(str) {
-  return new TextEncoder().encode(str).length;
-}
-
-async function getHistory() {
-  if (hasChromeStorage) {
-    const { history = [] } = await chrome.storage.sync.get('history');
-    return Array.isArray(history) ? history : [];
-  }
-  try {
-    return JSON.parse(localStorage.getItem('history') || '[]');
-  } catch {
-    return [];
-  }
-}
-
-async function saveHistory(history) {
-  let list = Array.isArray(history) ? history : [];
-  list = list.slice(0, HISTORY_LIMIT);
-  if (hasChromeStorage) {
-    // 超长时优先丢弃最旧记录，避免写入超过 storage.sync 的 8KB 单 key 限制
-    while (list.length > 1 && utf8Bytes(JSON.stringify(list)) > HISTORY_MAX_BYTES) {
-      list = list.slice(0, -1);
-    }
-    await chrome.storage.sync.set({ history: list });
-  } else {
-    localStorage.setItem('history', JSON.stringify(list));
-  }
-}
-
-// 清理已读通知：超过保留期后自动删除，避免历史无限累积
-const HISTORY_READ_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
-const CLAIM_TTL_MS = 2 * 60 * 1000;
-
-// 未完成的跨设备事件认领在 TTL 内有效，超时视为失效（发送端崩溃残留）。
-function isActiveHistoryClaim(h) {
-  if (!h || !h.pending) return false;
-  const ts = Number(h.claimAt) || new Date(h.time || 0).getTime() || 0;
-  return Date.now() - ts < CLAIM_TTL_MS;
-}
-
-async function pruneHistory() {
-  // 优先让 background 裁剪：history 是整键读-改-写，本页与后台是两个 JS 上下文，
-  // 进程内互斥锁互不生效。本页拿旧快照裁剪后整键写回，会把后台刚写入的**在途认领**
-  // 一起抹掉，arbitrateClaim 发现认领不见了就判 'skip' —— 提醒被静默吞掉。
-  if (hasChromeStorage && chrome.runtime && chrome.runtime.sendMessage) {
-    try {
-      const res = await chrome.runtime.sendMessage({ type: 'prune-history' });
-      if (res && res.ok) return;
-    } catch (e) {
-      // background 不可用时退回本页直裁剪。
-    }
-  }
-  try {
-    const history = await getHistory();
-    if (!history.length) return;
-    const cutoff = Date.now() - HISTORY_READ_RETENTION_MS;
-    const kept = history.filter((h) => {
-      // 清理过期未完成的跨设备事件认领（发送进程崩溃时可能残留）。
-      if (h && h.pending && !isActiveHistoryClaim(h)) return false;
-      if (!h.read) return true;
-      const readAt = Number(h.readAt) || new Date(h.time).getTime() || 0;
-      return readAt >= cutoff;
-    });
-    if (kept.length !== history.length) {
-      await saveHistory(kept);
-    }
-  } catch (err) {
-    console.error('[333 Watcher] history prune failed:', err);
-  }
-}
-
-// ---- 未读数显示 ----
-async function renderUnread() {
-  await pruneHistory();
-  // 尚未确认投递的事件认领不算提醒，避免失败/竞争时出现幽灵未读。
-  // 注意：`h && !h.pending` 才会剔除 null 记录；写成 `!h || !h.pending` 会把 null 留下，
-  // 随后的 h.read 就会抛 TypeError。
-  const history = (await getHistory()).filter((h) => h && !h.pending);
-  const unread = history.filter((h) => !h.read).length;
-
-  unreadBadge.textContent = unread;
-  unreadBadge.classList.toggle('hidden', unread === 0);
-  unreadBadge.title = unread > 0 ? unread + ' 条未读提醒' : '';
-
-  notifyDot.classList.toggle('hidden', unread === 0);
-  notifyCard.classList.toggle('has-unread', unread > 0);
-  markAllReadBtn.classList.toggle('hidden', unread === 0);
-  const hasRead = history.some((h) => h.read);
-  if (clearReadBtn) clearReadBtn.classList.toggle('hidden', !hasRead);
-  if (unread > 0) {
-    notifySummary.textContent = unread + ' 条未读';
-  } else if (history.length > 0) {
-    notifySummary.textContent = '共 ' + history.length + ' 条，全部已读';
-  } else {
-    notifySummary.textContent = '暂无通知';
-  }
-}
-
-// ---- 通知历史展开 ----
-historyToggle.addEventListener('click', async () => {
-  historyExpanded = !historyExpanded;
-  historyList.classList.toggle('hidden', !historyExpanded);
-  historyArrow.textContent = historyExpanded ? '▾' : '▸';
-  if (historyExpanded) {
-    await renderHistoryList();
-  }
-});
-
-markAllReadBtn.addEventListener('click', async (e) => {
-  e.stopPropagation();
-  await markAllHistoryRead();
-  if (historyExpanded) await renderHistoryList();
-});
-
-if (clearReadBtn) {
-  clearReadBtn.addEventListener('click', async (e) => {
-    e.stopPropagation();
-    const history = await getHistory();
-    const readCount = history.filter((h) => h.read).length;
-    if (readCount === 0) return;
-    const ok = confirm('确定清除 ' + readCount + ' 条已读记录吗？未读记录将保留。');
-    if (!ok) return;
-    await clearReadHistory();
-  });
-}
-
-// 优先让 background 写 history：它的写操作共用一把互斥锁，
-// 不会把后台刚写入的事件认领整键覆盖掉。发送失败时才回退到本页直写。
-async function askBackgroundMarkRead(payload) {
-  if (!hasChromeStorage || !chrome.runtime || !chrome.runtime.sendMessage) return false;
-  try {
-    const res = await chrome.runtime.sendMessage(payload);
-    return !!(res && res.ok);
-  } catch (e) {
-    return false;
-  }
-}
-
-async function markHistoryItemRead(id) {
-  if (await askBackgroundMarkRead({ type: 'mark-history-read', id })) {
-    renderUnread();
-    if (historyExpanded) await renderHistoryList();
-    return;
-  }
-  const history = await getHistory();
-  const item = history.find((h) => h && h.id === id);
-  if (!item || item.read) return;
-  item.read = true;
-  item.readAt = Date.now();
-  await saveHistory(history);
-  renderUnread();
-}
-
-async function markAllHistoryRead() {
-  if (await askBackgroundMarkRead({ type: 'mark-all-history-read' })) {
-    renderUnread();
-    if (historyExpanded) await renderHistoryList();
-    return;
-  }
-  const history = await getHistory();
-  if (!history.some((h) => h && !h.read)) return;
-  // 不触碰尚未完成投递的事件认领，避免影响跨设备去重判断。
-  await saveHistory(history.map((h) => (h && h.pending ? h : { ...h, read: true, readAt: Date.now() })));
-  renderUnread();
-}
-
-async function clearReadHistory() {
-  try {
-    if (hasChromeStorage && chrome.runtime && chrome.runtime.sendMessage) {
-      try {
-        const res = await chrome.runtime.sendMessage({ type: 'clear-read-history' });
-        if (res && res.ok) {
-          renderUnread();
-          if (historyExpanded) await renderHistoryList();
-          return;
-        }
-      } catch (e) {
-        // fallback to direct storage
-      }
-    }
-    const history = await getHistory();
-    const kept = history.filter((h) => !h.read);
-    if (kept.length === history.length) return;
-    await saveHistory(kept);
-    renderUnread();
-    if (historyExpanded) await renderHistoryList();
-  } catch (err) {
-    console.error('[333 Watcher] clear read history failed:', err);
-  }
-}
-
-function formatTime(iso) {
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return '';
-  const p = (n) => String(n).padStart(2, '0');
-  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
-    ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
-}
-
-async function renderHistoryList() {
-  const history = (await getHistory()).filter((h) => h && !h.pending);
-  historyList.innerHTML = '';
-
-  if (history.length === 0) {
-    const li = document.createElement('li');
-    li.className = 'history-empty';
-    li.textContent = '暂无通知记录';
-    historyList.appendChild(li);
-    return;
-  }
-
-  for (const h of history.slice(0, 20)) {
-    const li = document.createElement('li');
-    li.className = 'history-item' + (h.read ? '' : ' unread');
-
-    const msg = document.createElement('p');
-    msg.className = 'history-msg';
-    msg.textContent = h.message || h.name || '页面发生变化';
-    li.appendChild(msg);
-
-    const time = document.createElement('p');
-    time.className = 'history-time';
-    time.textContent = formatTime(h.time);
-    li.appendChild(time);
-
-    li.classList.add('clickable');
-    li.title = h.url ? '点击打开 ' + h.url : '点击标记已读';
-    li.addEventListener('click', async () => {
-      await markHistoryItemRead(h.id);
-      if (h.url) openUrl(h.url);
-    });
-    historyList.appendChild(li);
-  }
-}
-
-// ---- 打开网址 ----
-function openUrl(url) {
-  if (!url) return;
-  if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.create) {
-    chrome.tabs.create({ url: url });
-  } else {
-    window.open(url, '_blank');
-  }
-}
-
-async function closePagePicker() {
-  if (!hasTabsApi) return;
-  try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab && tab.id) {
-      await chrome.tabs.sendMessage(tab.id, { type: 'w333-close-dialog' });
-    }
-  } catch {}
-}
-
-// ---- 页脚版本号 ----
-(function renderFooterVersion() {
-  const el = document.getElementById('footer-version');
-  if (!el) return;
-  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getManifest) {
-    el.textContent = '333 Watcher v' + chrome.runtime.getManifest().version;
-  }
-})();
-
-// ---- 页脚 GitHub 链接 ----
-document.getElementById('about-link').addEventListener('click', (e) => {
-  e.preventDefault();
-  openUrl('https://github.com/lijianbin2/333watch');
-});
-
-// ---- 类型切换 ----
-function syncTypeSections() {
-  const t = inputType.value;
-  elementSection.classList.toggle('hidden', t !== 'element');
-  // 指定内容模式下“保存监控”按钮多余（由页面内 picker 浮层直接保存），新增时隐藏；编辑态保留以便保存名称/间隔修改
-  if (submitBtn) {
-    const hideSave = t === 'element' && editingId === null;
-    submitBtn.classList.toggle('hidden', hideSave);
-  }
-  if (t !== 'element') {
-    // 切到“整个网页”时，清理残留的点选状态并关闭网页上的选择浮层，避免误进选元素模式
-    pickedElement = null;
-    hidePickedInfo();
-    // 异步清理，不阻塞切换
-    clearPendingPick();
-    closePagePicker();
-  }
-}
-
-inputType.addEventListener('change', syncTypeSections);
-
-// 属性标签
-function attributeLabel(attr) {
-  if (attr === 'href') return '链接地址';
-  return '文本内容';
-}
-
-// ---- 元素点选 ----
-pickElementBtn.addEventListener('click', async () => {
-  if (inputType.value !== 'element') {
-    showStatus('请先将监控类型切换为“指定内容变化”再选择元素', true);
-    return;
-  }
-  if (!hasTabsApi || !hasScripting) {
-    showStatus('本地预览模式不支持元素选择', true);
-    return;
-  }
-  try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab || !tab.id || !/^https?:/.test(tab.url || '')) {
-      showStatus('请在普通网页（http/https）上使用元素选择', true);
-      return;
-    }
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: ['picker.js']
-    });
-    showStatus('已注入选择器，请回到网页移动鼠标高亮元素', false);
-    setTimeout(() => window.close(), 800);
-  } catch (err) {
-    console.error('[333 Watcher] picker inject failed:', err);
-    showStatus('注入失败：' + err.message, true);
-  }
-});
-
-function showPickedInfo(pick, prefix) {
-  const label = attributeLabel(pick.attribute);
-  const sample = pick.attribute === 'href' ? (pick.href || '') : (pick.text || '');
-  pickedInfo.textContent = (prefix || '已选择：') + (pick.tagName || '元素') + ' · ' + label +
-    (sample ? ' · ' + sample.slice(0, 40) : '');
-  pickedInfo.title = pick.selector || '';
-  pickedInfo.classList.remove('hidden');
-}
-
-function hidePickedInfo() {
-  pickedInfo.classList.add('hidden');
-  pickedInfo.textContent = '';
-}
-
-async function clearPendingPick() {
-  pickedElement = null;
-  hidePickedInfo();
-  if (hasLocalStorage) {
-    try { await chrome.storage.local.remove('pendingPick'); } catch {}
-  }
-}
-
-async function loadPendingPick() {
-  if (!hasLocalStorage || editingId !== null) return false;
-  try {
-    const { pendingPick } = await chrome.storage.local.get('pendingPick');
-    if (!pendingPick || !pendingPick.selector) return false;
-    pickedElement = pendingPick;
-    inputType.value = 'element';
-    setSelectedAttribute(pendingPick.attribute);
-    inputUrl.value = pendingPick.pageUrl || '';
-    inputName.value = pendingPick.pageTitle || pendingPick.text || '';
-    syncTypeSections();
-    showPickedInfo(pendingPick);
-    dbg('[333 Watcher] pendingPick loaded:', pendingPick.selector);
-    return true;
-  } catch (err) {
-    console.error('[333 Watcher] load pendingPick failed:', err);
-    return false;
-  }
-}
-
-if (inputAttribute) inputAttribute.addEventListener('change', () => {
-  if (pickedElement) {
-    setSelectedAttribute(inputAttribute.value);
-    showPickedInfo(pickedElement);
-  }
-});
-
-// ---- 编辑态切换 ----
-function enterEditMode(monitor) {
-  editingId = monitor.id;
-  inputType.value = monitor.type || 'page';
-  setSelectedAttribute(monitor.attribute);
-  inputName.value = monitor.name || '';
-  inputUrl.value = monitor.url || '';
-  inputInterval.value = monitor.interval || DEFAULT_INTERVAL;
-
-  syncTypeSections();
-  hidePickedInfo();
-  pickedElement = null;
-
-  if (monitor.type === 'element' && monitor.selector) {
-    showPickedInfo({
-      tagName: '元素',
-      attribute: monitor.attribute || 'text',
-      text: monitor.selector,
-      href: monitor.targetHref || '',
-      selector: monitor.selector
-    }, '当前元素：');
-  }
-
-  submitBtn.textContent = '保存修改';
-  if (submitBtn) submitBtn.classList.remove('hidden');
-  editingBanner.classList.remove('hidden');
-  hideStatus();
-  hideOverwriteConfirm();
-  inputName.focus();
-}
-
-function exitEditMode() {
-  editingId = null;
-  form.reset();
-  inputType.value = 'page';
-  setSelectedAttribute('text');
-  inputInterval.value = DEFAULT_INTERVAL;
-  syncTypeSections();
-  hidePickedInfo();
-  pickedElement = null;
-  submitBtn.textContent = '保存监控';
-  editingBanner.classList.add('hidden');
-  hideOverwriteConfirm();
-}
-
-cancelEditBtn.addEventListener('click', exitEditMode);
-
-// ---- 自动填充当前标签页信息（仅新增模式，且无点选结果时） ----
-async function fillFromActiveTab() {
-  if (!hasTabsApi || editingId !== null) return;
-
-  try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab) return;
-
-    if (tab.url && /^https?:/.test(tab.url)) {
-      inputUrl.value = tab.url;
-    }
-    if (tab.title) {
-      inputName.value = tab.title;
-    }
-  } catch (err) {
-    console.error('[333 Watcher] Failed to read active tab:', err);
-  }
-}
-
-// ---- 表单数据收集 ----
-function collectFormData() {
-  return {
-    type: inputType.value,
-    name: inputName.value.trim(),
-    url: normalizeUrl(inputUrl.value),
-    interval: clampInterval(inputInterval.value, DEFAULT_INTERVAL)
-  };
-}
-
-// ---- 保存监控 ----
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  hideStatus();
-
-  try {
-    const data = collectFormData();
-    const monitors = await getMonitors();
-
-    if (data.type === 'element' && !pickedElement && editingId === null) {
-      showStatus('请先点击「选择网页元素」在页面上点选目标', true);
-      return;
-    }
-
-    // 编辑模式：直接覆盖旧数据
-    if (editingId !== null) {
-      const idx = monitors.findIndex((m) => m.id === editingId);
-      if (idx === -1) {
-        showStatus('该监控已被删除', true);
-        exitEditMode();
-        return;
-      }
-      const old = monitors[idx];
-      const updated = {
-        ...old,
-        name: data.name,
-        url: data.url,
-        interval: data.interval,
-        type: data.type
-      };
-      if (data.type === 'element') {
-        if (pickedElement) {
-          updated.selector = pickedElement.selector;
-          updated.attribute = getSelectedAttribute();
-          updated.lastValue = attributeValue(pickedElement, updated.attribute);
-        } else {
-          updated.attribute = getSelectedAttribute(); // 保留旧 selector，只改属性也可
-          updated.lastValue = '';
-        }
-        updated.lastHash = '';
-      } else {
-        // page 类型：清掉 element 字段；URL 变了重置 hash 基线
-        updated.selector = '';
-        updated.attribute = '';
-        updated.lastValue = '';
-        updated.lastHash = normalizeUrl(old.url) === data.url && old.type === 'page' ? old.lastHash : '';
-      }
-      const duplicate = monitors.find((m) => m.id !== editingId && monitorKey(m) === monitorKey(updated));
-      if (duplicate) {
-        showStatus('已存在相同网址、选择器和属性的监控', true);
-        return;
-      }
-      updated.targetHref = '';
-      updated.targetText = '';
-      updated.failCount = 0;
-      updated.lastError = '';
-      updated.invalid = false;
-      updated.invalidReason = '';
-      updated.invalidSince = null;
-      updated.baselined = false;
-      monitors[idx] = updated;
-      await mutateMonitorsViaBackground({ op: 'upsert', monitor: updated }, () => saveMonitors(monitors));
-      await closePagePicker();
-      dbg('[333 Watcher] Monitor updated:', updated);
-      exitEditMode();
-      await clearPendingPick();
-      showStatus('修改已保存 ✓', false);
-      renderList();
-      return;
-    }
-
-    // 新增模式：整页按 URL 去重；元素按 URL + selector + attribute 去重。
-    const candidate = {
-      type: data.type,
-      url: data.url,
-      selector: data.type === 'element' && pickedElement ? pickedElement.selector : '',
-      attribute: data.type === 'element' ? getSelectedAttribute() : ''
-    };
-    const existing = monitors.find((m) => monitorKey(m) === monitorKey(candidate));
-    if (existing) {
-      showOverwriteConfirm(existing, data);
-      return;
-    }
-
-    await addMonitor(data);
-  } catch (err) {
-    showStatus(storageErrorMessage(err), true);
-  }
-});
-
-function attributeValue(pick, attr) {
-  if (attr === 'href') return limitMonitorValue(pick.href || '', attr);
-  return limitMonitorValue(pick.text || '', attr);
-}
-
-// ---- 新增 ----
-async function addMonitor(data) {
-  const monitors = await getMonitors();
-  const attribute = data.type === 'element' ? getSelectedAttribute() : '';
-  const monitor = {
-    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-    name: data.name,
-    url: data.url,
-    interval: data.interval,
-    type: data.type,
-    selector: data.type === 'element' ? pickedElement.selector : '',
-    attribute: data.type === 'element' ? attribute : '',
-    lastValue: data.type === 'element' ? attributeValue(pickedElement, attribute) : '',
-    baselined: false,
-    createdAt: new Date().toISOString(),
-    updatedAt: Date.now(),
-    lastHash: '',
-    lastCheck: '',
-    lastCheckTime: 0,
-    nextCheckTime: 0,
-    eventSeq: 0
-  };
-  monitors.push(monitor);
-  await mutateMonitorsViaBackground({ op: 'upsert', monitor: monitor }, () => saveMonitors(monitors));
-  await closePagePicker();
-  dbg('[333 Watcher] Monitor added:', monitor);
-  await clearPendingPick();
-  showStatus('已保存 ✓', false);
-  form.reset();
-  inputType.value = 'page';
-  setSelectedAttribute('text');
-  inputInterval.value = DEFAULT_INTERVAL;
-  syncTypeSections();
-  renderList();
-
-  if (hasChromeStorage) {
-    setTimeout(() => window.close(), 400);
-  }
-}
-
-// ---- 覆盖确认 ----
-let pendingOverwrite = null;
-
-function showOverwriteConfirm(existing, data) {
-  pendingOverwrite = { existing, data };
-  overwriteConfirm.classList.remove('hidden');
-  hideStatus();
-}
-
-function hideOverwriteConfirm() {
-  pendingOverwrite = null;
-  overwriteConfirm.classList.add('hidden');
-}
-
-confirmOverwriteBtn.addEventListener('click', async () => {
-  if (!pendingOverwrite) return;
-  try {
-    const { existing, data } = pendingOverwrite;
-    hideOverwriteConfirm();
-
-    const monitors = await getMonitors();
-    const idx = monitors.findIndex((m) => m.id === existing.id);
-    if (idx !== -1) {
-      const old = monitors[idx];
-      const updated = {
-        ...old,
-        name: data.name,
-        url: data.url,
-        interval: data.interval,
-        type: data.type
-      };
-      if (data.type === 'element' && pickedElement) {
-        updated.selector = pickedElement.selector;
-        updated.attribute = getSelectedAttribute();
-        updated.lastValue = attributeValue(pickedElement, updated.attribute);
-      } else if (data.type === 'page') {
-        updated.selector = '';
-        updated.attribute = '';
-        updated.lastValue = '';
-        updated.lastHash = normalizeUrl(old.url) === data.url ? old.lastHash : '';
-      }
-      updated.targetHref = '';
-      updated.targetText = '';
-      updated.lastHash = '';
-      updated.baselined = false;
-      monitors[idx] = updated;
-      await mutateMonitorsViaBackground({ op: 'upsert', monitor: updated }, () => saveMonitors(monitors));
-      await closePagePicker();
-      dbg('[333 Watcher] Monitor overwritten:', updated);
-    }
-    await clearPendingPick();
-    showStatus('已覆盖保存 ✓', false);
-    form.reset();
-    inputType.value = 'page';
-    setSelectedAttribute('text');
-    inputInterval.value = DEFAULT_INTERVAL;
-    syncTypeSections();
-    renderList();
-
-    if (hasChromeStorage) {
-      setTimeout(() => window.close(), 400);
-    }
-  } catch (err) {
-    showStatus(storageErrorMessage(err), true);
-  }
-});
-
-cancelOverwriteBtn.addEventListener('click', () => {
-  hideOverwriteConfirm();
-  showStatus('已取消保存', true);
-});
-
-// ---- 监控列表渲染 ----
-function typeLabel(m) {
-  if (m.type === 'element') return '指定内容';
-  return '整个网页';
-}
-function typeShortLabel(m) {
-  if (m.type === 'element') return '元素';
-  return '整页';
-}
-function formatRelativeTime(iso) {
-  if (!iso) return '';
-  const t = new Date(iso).getTime();
-  if (isNaN(t)) return '';
-  const diff = Date.now() - t;
-  const m = Math.floor(diff / 60000);
-  if (m < 1) return '刚刚';
-  if (m < 60) return m + '分前';
-  const h = Math.floor(m / 60);
-  if (h < 24) return h + '小时前';
-  const d = Math.floor(h / 24);
-  if (d < 7) return d + '天前';
-  return new Date(iso).toLocaleDateString();
-}
-function formatShortTime(ts) {
-  if (!ts) return '';
-  const d = new Date(ts);
-  if (isNaN(d.getTime())) return '';
-  return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
-}
-
-function monitorUpdatedAt(m) {
-  if (typeof m.updatedAt === 'number') return m.updatedAt;
-  if (typeof m.createdAt === 'string') {
-    const t = new Date(m.createdAt).getTime();
-    if (!isNaN(t)) return t;
-  }
-  return 0;
-}
-
-// 检查结果反馈：renderList 是全量重建，反馈不能只写进旧 DOM 节点，
-// 要先存下来，重建时再按监控 id 贴回新节点。
-let pendingCheckFeedback = null;
-
-// renderList 是 async 且调用方普遍不 await它（init 首屏、检查结果、增删改、
-// 测试面板都会触发），多轮重建会交错：先 await getMonitors() 的那轮可能**后**落地，
-// 用旧快照 innerHTML='' 冲掉刚落地的结果。用一条 promise 链把重建串起来，
-// 保证"最后发起的那一轮"就是最后落地的那一轮，反馈也就不会莫名其妙消失。
-let _renderChain = Promise.resolve();
-function renderList() {
-  const run = _renderChain.then(() => renderListUnlocked(), () => renderListUnlocked());
-  _renderChain = run.then(() => {}, () => {});
-  return run;
-}
-
-async function renderListUnlocked() {
-  const monitors = (await getMonitors()).slice().sort((a, b) => monitorUpdatedAt(b) - monitorUpdatedAt(a));
-  countEl.textContent = monitors.length;
-
-  listEl.innerHTML = '';
-  for (const m of monitors) {
-    const li = document.createElement('li');
-    li.className = 'watcher-item';
-    li.dataset.monitorId = m.id || '';
-
-    const info = document.createElement('div');
-    info.className = 'watcher-info';
-
-    const name = document.createElement('a');
-    name.className = 'watcher-url watcher-link';
-    name.textContent = m.name || m.url;
-    name.href = m.url || '#';
-    name.title = (m.url || '') + '（点击打开）';
-    name.addEventListener('click', (e) => {
-      e.preventDefault();
-      openUrl(m.url);
-    });
-    info.appendChild(name);
-
-    // —— 精简版 meta：单行展示关键信息，完整信息放 tooltip ——
-    const meta = document.createElement('div');
-    meta.className = 'watcher-meta';
-
-    const tag = document.createElement('span');
-    tag.className = 'meta-tag ' + (m.type === 'element' ? 'type-element' : 'type-page');
-    tag.textContent = typeShortLabel(m);
-    meta.appendChild(tag);
-
-    const intervalEl = document.createElement('span');
-    intervalEl.className = 'meta-time';
-    intervalEl.textContent = m.interval + 'm';
-    intervalEl.title = '每 ' + m.interval + ' 分钟检查一次';
-    meta.appendChild(intervalEl);
-
-    // 分隔点
-    const dot1 = document.createElement('span');
-    dot1.className = 'meta-dot';
-    dot1.textContent = '·';
-    meta.appendChild(dot1);
-
-    if (m.type === 'element' && m.selector) {
-      const sel = document.createElement('span');
-      sel.className = 'meta-selector';
-      // 完整选择器放 title，显示只取末尾一截避免过长
-      sel.textContent = m.selector;
-      sel.title = m.selector + (m.attribute ? ' [' + m.attribute + ']' : '');
-      meta.appendChild(sel);
-      const dot2 = document.createElement('span');
-      dot2.className = 'meta-dot';
-      dot2.textContent = '·';
-      meta.appendChild(dot2);
-    }
-
-    if (m.invalid) {
-      const inv = document.createElement('span');
-      inv.className = 'meta-time has-invalid';
-      inv.textContent = '已失效';
-      let invTip = m.invalidReason || '监控目标已失效';
-      if (m.invalidSince) { try { invTip += '\n自：' + new Date(m.invalidSince).toLocaleString(); } catch (e2) {} }
-      invTip += '\n请检查网址或重新拾取元素；恢复正常会自动通知';
-      inv.title = invTip;
-      meta.appendChild(inv);
-    } else if (m.lastError) {
-      const err = document.createElement('span');
-      err.className = 'meta-time has-error';
-      const fc = Number(m.failCount) || 0;
-      err.textContent = fc > 0 ? '检查失败x' + fc : '检查失败';
-      err.title = m.lastError + (fc > 0 ? '\n连续失败 ' + fc + ' 次，达到 ' + INVALID_THRESHOLD + ' 次将通知失效' : '');
-      meta.appendChild(err);
-    } else if (m.lastCheck) {
-      const t = document.createElement('span');
-      t.className = 'meta-time';
-      const rel = formatRelativeTime(m.lastCheck);
-      t.textContent = rel || formatShortTime(m.lastCheck);
-      // tooltip 显示完整时间 + 下次时间
-      let tip = '上次：' + new Date(m.lastCheck).toLocaleString();
-      if (m.nextCheckTime) tip += '\n下次：' + new Date(m.nextCheckTime).toLocaleString();
-      t.title = tip;
-      meta.appendChild(t);
-    } else {
-      const t = document.createElement('span');
-      t.className = 'meta-time';
-      t.textContent = '未检查';
-      meta.appendChild(t);
-    }
-
-    // 完整详情 tooltip 放在整行
-    let metaTip = typeLabel(m) + ' · 每' + m.interval + '分钟';
-    if (m.type === 'element' && m.selector) metaTip += '\n选择器：' + m.selector;
-    if (m.lastCheck) {
-      metaTip += '\n上次：' + new Date(m.lastCheck).toLocaleString();
-      if (m.nextCheckTime) metaTip += '\n下次：' + new Date(m.nextCheckTime).toLocaleString();
-    }
-    meta.title = metaTip;
-    info.appendChild(meta);
-
-    const feedback = document.createElement('p');
-    feedback.className = 'watcher-feedback hidden';
-    info.appendChild(feedback);
-
-    const actions = document.createElement('div');
-    actions.className = 'item-actions';
-
-    const check = document.createElement('button');
-    check.className = 'btn-check';
-    check.type = 'button';
-    check.textContent = '立即检查';
-    check.title = '立即执行一次检查';
-    check.addEventListener('click', () => checkNow(m.id, check, feedback));
-
-    const edit = document.createElement('button');
-    edit.className = 'btn-check';
-    edit.type = 'button';
-    edit.textContent = '编辑';
-    edit.title = '编辑该监控';
-    edit.addEventListener('click', () => enterEditMode(m));
-
-    const del = document.createElement('button');
-    del.className = 'btn-delete';
-    del.type = 'button';
-    del.textContent = '×';
-    del.title = '删除';
-    del.addEventListener('click', () => removeMonitor(m.id));
-
-    actions.appendChild(check);
-    actions.appendChild(edit);
-    actions.appendChild(del);
-    li.appendChild(info);
-    li.appendChild(actions);
-    listEl.appendChild(li);
-  }
-
-  // 反馈必须在本轮重建**结束之后**才贴：renderList 是 async，而调用方并不 await
-  // 它（init 的首屏渲染、检查结果、删除等都会并发触发），先完成的那一轮如果先贴
-  // 再被后完成的一轮 innerHTML='' 冲掉，结果就是"点了立即检查什么都没有"。
-  // renderList 已通过 _renderChain 串行化，因此"最后发起的一轮"必然是"最后落地的
-  // 一轮"，贴完即可消费掉标记 —— 否则标记会一直残留，之后任何无关的重建（编辑、
-  // 删除、测试面板、init）都会把上一次的旧反馈重新贴回，等于用一个 bug 换另一个。
-  if (pendingCheckFeedback) {
-    const fb = pendingCheckFeedback;
-    for (const li of Array.from(listEl.children)) {
-      const info = li.children[0];
-      if (!info) continue;
-      const target = Array.from(info.children).find(
-        (c) => c && typeof c.className === 'string' && c.className.indexOf('watcher-feedback') !== -1
-      );
-      if (!target) continue;
-      const isTarget = li.dataset && li.dataset.monitorId === fb.id;
-      if (isTarget) {
-        target.textContent = fb.text;
-        target.classList.toggle('error', !!fb.isError);
-        target.classList.remove('hidden');
-      } else {
-        // 其它行不该残留上一次检查的反馈。
-        target.textContent = '';
-        target.classList.remove('error');
-        target.classList.add('hidden');
-      }
-    }
-    pendingCheckFeedback = null;
-  }
-}
-
-// ---- 立即检查 ----
-async function checkNow(id, btn, feedback) {
-  btn.disabled = true;
-  btn.textContent = '...';
-  hideStatus();
-  showCheckFeedback(feedback, '正在检查...', false);
-  try {
-    if (!(hasChromeStorage && chrome.runtime && chrome.runtime.sendMessage)) {
-      showCheckFeedback(feedback, '本地预览模式不支持检查', true);
-      return;
-    }
-    const res = await chrome.runtime.sendMessage({ type: 'check-now', id: id });
-    if (!res || !res.ok) {
-      showCheckFeedback(feedback, '检查失败：' + ((res && res.error) || '未知错误') + '，请查看 Service Worker 日志', true);
-    } else if (res.result === 'changed') {
-      pendingCheckFeedback = { id, text: '检测到变化，已发送通知 ✓', isError: false };
-      renderUnread();
-      renderList();
-    } else if (res.result === 'not-found') {
-      pendingCheckFeedback = { id, text: '未找到目标（已尝试自愈）；连续2次失败将通知失效', isError: true };
-      renderList();
-    } else if (res.result === 'error') {
-      pendingCheckFeedback = { id, text: '网络请求失败，请检查网址或网络；连续2次失败将通知失效', isError: true };
-      renderList();
-    } else if (res.result === 'flaky') {
-      showCheckFeedback(feedback, '检测到抖动，已抑制通知（下次再确认）', false);
-    } else if (res.result === 'baselined') {
-      pendingCheckFeedback = { id, text: '首次检查：已建立基线（本次不通知）', isError: false };
-      renderList();
-    } else if (res.result === 'changed-elsewhere') {
-      pendingCheckFeedback = { id, text: '检测到变化，但已由本机或另一台设备的检查记录，未重复通知', isError: false };
-      renderList();
-    } else {
-      pendingCheckFeedback = { id, text: '暂无变化', isError: false };
-      renderList();
-    }
-  } catch (err) {
-    console.error('[333 Watcher] check-now failed:', err);
-    showCheckFeedback(feedback, '检查失败，详见 Service Worker 日志', true);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '立即检查';
-  }
-}
-
-function showCheckFeedback(element, text, isError) {
-  if (!element) return;
-  listEl.querySelectorAll('.watcher-feedback').forEach((item) => {
-    item.classList.add('hidden');
-    item.classList.remove('error');
-  });
-  element.textContent = text;
-  element.classList.remove('hidden');
-  element.classList.toggle('error', !!isError);
-}
-
-// ---- 批量更新已有监控的检查间隔 ----
-bulkIntervalBtn.addEventListener('click', async () => {
-  try {
-    const monitors = await getMonitors();
-    if (!monitors.length) {
-      showStatus('还没有可更新的监控', true);
-      return;
-    }
-    const confirmed = window.confirm('确定把全部 ' + monitors.length + ' 个监控的检查间隔改为 500 分钟吗？');
-    if (!confirmed) return;
-
-    const updated = monitors.map((m) => ({ ...m, interval: DEFAULT_INTERVAL }));
-    await mutateMonitorsViaBackground({ op: 'set-interval', interval: DEFAULT_INTERVAL }, () => saveMonitors(updated));
-    renderList();
-    showStatus('已将 ' + updated.length + ' 个监控的检查间隔改为 500 分钟 ✓', false);
-  } catch (err) {
-    showStatus(storageErrorMessage(err), true);
-  }
-});
-
-// ---- 测试通知 ----
-const testNotifyBtn = document.getElementById('test-notify-btn');
-testNotifyBtn.addEventListener('click', async () => {
-  testNotifyBtn.disabled = true;
-  hideStatus();
-  try {
-    if (!(hasChromeStorage && chrome.runtime && chrome.runtime.sendMessage)) {
-      showStatus('本地预览模式不支持通知', true);
-      return;
-    }
-    const res = await chrome.runtime.sendMessage({ type: 'test-notification' });
-    if (res && res.ok) {
-      showStatus('测试通知已发送（ID: ' + res.notificationId + '），若未弹出请检查系统通知设置', false);
-    } else {
-      showStatus('通知发送失败：' + ((res && res.error) || '未知错误') + '（可能通知权限不足）', true);
-    }
-  } catch (err) {
-    console.error('[333 Watcher] test notification failed:', err);
-    showStatus('通知发送失败：' + err.message, true);
-  } finally {
-    testNotifyBtn.disabled = false;
-  }
-});
-
-async function removeMonitor(id) {
-  try {
-    const monitors = await getMonitors();
-    const target = monitors.find((m) => m.id === id);
-    if (!target) return;
-    // 只删除用户点击的这一条；同一网址的其他元素监控应继续运行。
-    const kept = monitors.filter((m) => m.id !== id);
-    await mutateMonitorsViaBackground({ op: 'remove', id: id }, () => saveMonitors(kept));
-    // 立即清除对应 alarm，防止删除后仍被调度检查
-    if (typeof chrome !== 'undefined' && chrome.alarms) {
-      const removed = monitors.filter((m) => !kept.includes(m));
-      for (const m of removed) {
-        try { await chrome.alarms.clear(ALARM_PREFIX + m.id); } catch {}
-      }
-    }
-    if (editingId === id) exitEditMode();
-    renderList();
-  } catch (err) {
-    showStatus(storageErrorMessage(err), true);
-  }
-}
-
-function showStatus(text, isError) {
-  statusMsg.textContent = text;
-  statusMsg.classList.remove('hidden');
-  statusMsg.classList.toggle('error', !!isError);
-}
-
-function hideStatus() {
-  statusMsg.classList.add('hidden');
-  statusMsg.classList.remove('error');
-}
-
-// ---- 历史变化时实时刷新未读徽标 ----
-if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'sync' && changes.history) {
-      renderUnread();
-    }
-  });
-}
-
-// ---- 数据迁移：导出 / 导入（本地版 ↔ 商店版） ----
-const exportBtn = document.getElementById('export-btn');
-const importToggleBtn = document.getElementById('import-toggle-btn');
-const importBox = document.getElementById('import-box');
-const importArea = document.getElementById('import-area');
-const importConfirmBtn = document.getElementById('import-confirm-btn');
-const migrateStatus = document.getElementById('migrate-status');
-
-function showMigrateStatus(text, isError) {
-  migrateStatus.textContent = text;
-  migrateStatus.classList.remove('hidden');
-  migrateStatus.classList.toggle('error', !!isError);
-}
-
-async function copyText(text) {
-  try {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {}
-  try {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    const ok = document.execCommand('copy');
-    ta.remove();
-    return ok;
-  } catch { return false; }
-}
-
-exportBtn.addEventListener('click', async () => {
-  try {
-    const monitors = await getMonitors();
-    const payload = JSON.stringify({
-      app: '333-watcher',
-      exportedAt: new Date().toISOString(),
-      monitors: monitors
-    }, null, 2);
-    const ok = await copyText(payload);
-    if (ok) {
-      showMigrateStatus('已复制导出内容，请到另一个版本点击「导入设置」粘贴后导入');
-    } else {
-      console.log('[333 Watcher] 导出数据:', payload);
-      showMigrateStatus('复制失败，请从控制台复制导出的 JSON', true);
-    }
-  } catch (err) {
-    showMigrateStatus('导出失败：' + err.message, true);
-  }
-});
-
-importToggleBtn.addEventListener('click', () => {
-  const willShow = importBox.classList.contains('hidden');
-  importBox.classList.toggle('hidden', !willShow);
-  if (willShow) importArea.focus();
-});
-
-importConfirmBtn.addEventListener('click', async () => {
-  try {
-    const data = JSON.parse(importArea.value.trim());
-    if (!data || !Array.isArray(data.monitors)) {
-      throw new Error('格式不正确，请粘贴完整的导出内容');
-    }
-    const imported = data.monitors;
-    const normalized = [];
-    let skipped = 0;
-    for (const raw of imported) {
-      const m = normalizeImportedMonitor(raw);
-      if (!m) { skipped++; continue; }
-      normalized.push(m);
-    }
-    // 合并由 background 用“存储里的最新列表”完成，避免页面旧快照整键覆盖。
-    const res = await mutateMonitorsViaBackground({ op: 'import-by-key', monitors: normalized }, async () => {
-      const current = await getMonitors();
-      const { merged, added } = mergeImportedMonitors(current, normalized);
-      await saveMonitors(merged);
-      return { added };
-    });
-    const added = res && res.added != null ? res.added : normalized.length;
-    renderList();
-    showMigrateStatus('导入成功：有效 ' + (imported.length - skipped) + ' 条，新增 ' + added + (skipped ? '，跳过无效 ' + skipped + ' 条' : ''));
-  } catch (err) {
-    showMigrateStatus('导入失败：' + err.message, true);
-  }
-});
-
-// ---- 初始化 ----
-(async function init() {
-  renderSyncBadge();
-  renderUnread();
-  renderList();
-  const hasPick = await loadPendingPick();
-  if (!hasPick) {
-    fillFromActiveTab();
-  }
-  syncTypeSections();
-})();
-// ================= 🧪 测试模式 (v0.6.17 text/href 双路) =================
-const TEST_URL_TEXT = '333-test://text';
-const TEST_URL_HREF = '333-test://link';
-const testModeToggle = document.getElementById('test-mode-toggle');
-const testModeBody = document.getElementById('test-mode-body');
-const testModeArrow = document.getElementById('test-mode-arrow');
-const testCreateTextBtn = document.getElementById('test-create-text-btn');
-const testCreateHrefBtn = document.getElementById('test-create-href-btn');
-const testChangeTextBtn = document.getElementById('test-change-text-btn');
-const testChangeHrefBtn = document.getElementById('test-change-href-btn');
-const testCheckTextBtn = document.getElementById('test-check-text-btn');
-const testCheckHrefBtn = document.getElementById('test-check-href-btn');
-const testClearBtn = document.getElementById('test-clear-btn');
-const testStatus = document.getElementById('test-status');
-const testTextDetail = document.getElementById('test-text-detail');
-const testHrefDetail = document.getElementById('test-href-detail');
-
-function showTestStatus(text, isError) {
-  if (!testStatus) return;
-  testStatus.textContent = text;
-  testStatus.classList.remove('hidden');
-  testStatus.classList.toggle('error', !!isError);
-}
-function hideTestStatus(){ if(testStatus) testStatus.classList.add('hidden'); }
-
-async function refreshTestDetails(){
-  try {
-    const res = await chrome.runtime.sendMessage({ type: 'test-get-status' });
-    if (!res || !res.ok) return;
-    const curText = res.curText || res.cur;
-    const curHref = res.curHref;
-    const textMon = res.textMonitor;
-    const hrefMon = res.hrefMonitor;
-    if (testTextDetail) {
-      if (!textMon) testTextDetail.textContent = '当前文本: ' + curText + '\n文本监控: 未创建（点“创建文字监控”）';
-      else {
-        const last = textMon.lastValue || '(空)';
-        testTextDetail.textContent = '当前文本: ' + curText + '\n记录值: ' + last + '\n' + (curText !== last ? '● 下次检查→已变化': '○ 一致→无变化') + '\n上次: ' + (textMon.lastCheck || '从未') + ' · ' + (textMon.interval||1) + '分钟';
-      }
-      testTextDetail.classList.remove('hidden');
-    }
-    if (testHrefDetail) {
-      if (!hrefMon) testHrefDetail.textContent = '当前链接: ' + curHref + '\n链接监控: 未创建（点“创建链接监控”）';
-      else {
-        const last = hrefMon.lastValue || '(空)';
-        testHrefDetail.textContent = '当前链接: ' + curHref + '\n记录值: ' + last + '\n' + (curHref !== last ? '● 下次检查→已变化': '○ 一致→无变化') + '\n上次: ' + (hrefMon.lastCheck || '从未') + ' · ' + (hrefMon.interval||1) + '分钟';
-      }
-      testHrefDetail.classList.remove('hidden');
-    }
-  } catch(e){}
-}
-
-if (testModeToggle && testModeBody) {
-  testModeToggle.addEventListener('click', () => {
-    testModeBody.classList.toggle('hidden');
-    if (testModeArrow) testModeArrow.classList.toggle('open', !testModeBody.classList.contains('hidden'));
-    if (!testModeBody.classList.contains('hidden')) refreshTestDetails();
-  });
-}
-async function handleCreate(attr){
-  const btn = attr==='href' ? testCreateHrefBtn : testCreateTextBtn;
-  if(btn) btn.disabled=true;
-  hideTestStatus();
-  try{
-    const res = await chrome.runtime.sendMessage({ type: 'test-create', attribute: attr });
-    if(res && res.ok){
-      const label = attr === 'href' ? '"链接"' : '"文字"';
-      showTestStatus(label + (res.mode === 'exists' ? ' 监控已存在 ✓' : ' 监控已创建 ✓ 1分钟间隔'), false);
-      renderList(); renderUnread(); refreshTestDetails();
-    } else showTestStatus('创建失败: '+((res&&res.error)||'未知'), true);
-  }catch(e){ showTestStatus('创建失败: '+e.message, true); }
-  if(btn) btn.disabled=false;
-}
-async function handleSimulate(attr){
-  const btn = attr==='href' ? testChangeHrefBtn : testChangeTextBtn;
-  if(btn) btn.disabled=true;
-  try{
-    const res = await chrome.runtime.sendMessage({ type: 'test-simulate-change', attribute: attr });
-    if(res && res.ok){ showTestStatus((attr==='href')?'已模拟链接变化: ':'已模拟文字变化: ' + res.prev + ' → ' + res.cur + ' ，点“立即检查”应收到通知', false); refreshTestDetails(); }
-    else showTestStatus('模拟失败', true);
-  }catch(e){ showTestStatus('模拟失败: '+e.message, true); }
-  if(btn) btn.disabled=false;
-}
-async function handleCheck(attr){
-  const btn = attr==='href' ? testCheckHrefBtn : testCheckTextBtn;
-  if(btn){ btn.disabled=true; var old=btn.textContent; btn.textContent='检查中...'; }
-  hideTestStatus();
-  try{
-    const st = await chrome.runtime.sendMessage({ type: 'test-get-status' });
-    const m = (attr==='href') ? st.hrefMonitor : st.textMonitor;
-    if(!m){ showTestStatus((attr==='href')?'请先创建链接监控':'请先创建文字监控', true); }
-    else {
-      const res = await chrome.runtime.sendMessage({ type: 'check-now', id: m.id });
-      if(!res || !res.ok) showTestStatus('检查失败: '+((res&&res.error)||'未知'), true);
-      else if(res.result==='changed'){ showTestStatus((attr==='href')?'🔗 链接已变化，已发通知 ✓':'📄 文字已变化，已发通知 ✓', false); renderUnread(); renderList(); }
-      else if(res.result==='baselined') showTestStatus('首次检查：已建立基线（本次不通知）', false);
-else if(res.result==='changed-elsewhere') showTestStatus('变化已由其他检查记录，未重复通知', false);
-      else if(res.result==='unchanged') showTestStatus('暂无变化（需先点“模拟变化”）', true);
-      else showTestStatus('结果: '+res.result, res.result==='error');
-      refreshTestDetails();
-    }
-  }catch(e){ showTestStatus('检查失败: '+e.message, true); }
-  if(btn){ btn.disabled=false; btn.textContent=old; }
-}
-if(testCreateTextBtn) testCreateTextBtn.addEventListener('click', ()=>handleCreate('text'));
-if(testCreateHrefBtn) testCreateHrefBtn.addEventListener('click', ()=>handleCreate('href'));
-if(testChangeTextBtn) testChangeTextBtn.addEventListener('click', ()=>handleSimulate('text'));
-if(testChangeHrefBtn) testChangeHrefBtn.addEventListener('click', ()=>handleSimulate('href'));
-if(testCheckTextBtn) testCheckTextBtn.addEventListener('click', ()=>handleCheck('text'));
-if(testCheckHrefBtn) testCheckHrefBtn.addEventListener('click', ()=>handleCheck('href'));
-if(testClearBtn){
-  testClearBtn.addEventListener('click', async ()=>{
-    if(!confirm('清理所有测试监控和测试值？')) return;
-    try{ const res=await chrome.runtime.sendMessage({type:'test-clear'}); showTestStatus('已清理 '+(res.removed||0)+' 条测试监控', false); renderList(); refreshTestDetails(); }catch(e){ showTestStatus('清理失败: '+e.message, true); }
-  });
-}
-try{ refreshTestDetails(); }catch{}
-
+/**
+ * 333 Watcher - Add Monitor 页面逻辑 (v0.6.50 - 监控增删改与导入)
+ *
+ * 监控类型：
+ * - page：整个网页变化（整页 hash）
+ * - element：指定内容变化（CSS selector + 属性 text/href）
+ *
+ * 兼容：
+ * - 旧 type="link" 由 background 迁移为 type="element" + attribute="href"（v0.6.12 已移除 src 图片监控）
+ */
+
+const form = document.getElementById('monitor-form');
+const inputType = document.getElementById('input-type');
+const inputAttribute = document.getElementById('input-attribute');
+let currentAttribute = 'text';
+function getSelectedAttribute() {
+  if (pickedElement && pickedElement.attribute) return pickedElement.attribute;
+  if (inputAttribute && inputAttribute.value) return inputAttribute.value;
+  return currentAttribute;
+}
+function setSelectedAttribute(val) {
+  const v = (val === 'src' ? 'text' : (val || 'text'));
+  currentAttribute = v;
+  if (pickedElement) pickedElement.attribute = v;
+  if (inputAttribute) inputAttribute.value = v;
+}
+const inputName = document.getElementById('input-name');
+const inputUrl = document.getElementById('input-url');
+const inputInterval = document.getElementById('input-interval');
+const submitBtn = document.getElementById('submit-btn');
+const statusMsg = document.getElementById('status-msg');
+const listEl = document.getElementById('monitor-list');
+const countEl = document.getElementById('monitor-count');
+const syncBadge = document.getElementById('sync-badge');
+const unreadBadge = document.getElementById('unread-badge');
+
+const editingBanner = document.getElementById('editing-banner');
+const cancelEditBtn = document.getElementById('cancel-edit-btn');
+const overwriteConfirm = document.getElementById('overwrite-confirm');
+const confirmOverwriteBtn = document.getElementById('confirm-overwrite-btn');
+const cancelOverwriteBtn = document.getElementById('cancel-overwrite-btn');
+
+const elementSection = document.getElementById('element-section');
+const pickElementBtn = document.getElementById('pick-element-btn');
+const pickedInfo = document.getElementById('picked-info');
+
+const notifyCard = document.getElementById('notify-card');
+const notifyDot = document.getElementById('notify-dot');
+const notifySummary = document.getElementById('notify-summary');
+const markAllReadBtn = document.getElementById('mark-all-read-btn');
+const clearReadBtn = document.getElementById('clear-read-btn');
+const historyToggle = document.getElementById('history-toggle');
+const historyList = document.getElementById('history-list');
+const historyArrow = document.getElementById('history-arrow');
+const bulkIntervalBtn = document.getElementById('bulk-interval-btn');
+
+const hasChromeStorage = typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync;
+// pendingPick 是本机一次性交接状态，不参与同步（见 picker.js 里的说明），
+// 所以单独判断 local，别让它跟着 sync 的探测结果走。
+const hasLocalStorage = typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local;
+const hasTabsApi = typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query;
+const hasScripting = typeof chrome !== 'undefined' && chrome.scripting && chrome.scripting.executeScript;
+const DEFAULT_INTERVAL = 500;
+const INVALID_THRESHOLD = 2;
+const MAX_TEXT_VALUE_CHARS = 4096;
+const MAX_URL_VALUE_CHARS = 2048;
+const FETCH_TIMEOUT_MS = 20000;
+const MAX_HTML_BYTES = 2.5 * 1024 * 1024;
+
+function simpleHash(str) {
+  let hash = 5381;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) + hash + str.charCodeAt(i)) >>> 0;
+  }
+  return hash.toString(16);
+}
+
+function stripHeavy(html) {
+  return String(html || '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, '');
+}
+
+async function fetchWithTimeout(url, init) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...(init || {}), signal: controller.signal });
+  } catch (err) {
+    if (err && err.name === 'AbortError') throw new Error('请求超时');
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function readResponseText(response, maxBytes) {
+  const limit = maxBytes || MAX_HTML_BYTES;
+  const declared = Number(response.headers && response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > limit) throw new Error('响应内容过大');
+  if (!response.body || typeof response.body.getReader !== 'function') {
+    const text = await response.text();
+    if (new TextEncoder().encode(text).byteLength > limit) throw new Error('响应内容过大');
+    return text;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = '';
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      total += part.value.byteLength;
+      if (total > limit) {
+        try { await reader.cancel(); } catch {}
+        throw new Error('响应内容过大');
+      }
+      text += decoder.decode(part.value, { stream: true });
+    }
+    text += decoder.decode();
+    return text;
+  } finally {
+    try { reader.releaseLock(); } catch {}
+  }
+}
+
+async function buildPageBaseline(url) {
+  try {
+    const res = await fetchWithTimeout(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const html = await readResponseText(res, MAX_HTML_BYTES);
+    const hash = simpleHash(stripHeavy(html));
+    return { ok: true, hash };
+  } catch (e) {
+    dbg('[333 Watcher] buildPageBaseline failed:', e && e.message || e);
+    return { ok: false, hash: '' };
+  }
+}
+
+
+// ---- 状态 ----
+let editingId = null;
+let pickedElement = null;   // { selector, attribute, text, href, pageUrl, pageTitle, tagName }
+let historyExpanded = false;
+
+const DEBUG = false; // 发布版关闭信息日志，调试时改为 true
+function dbg(...args) { if (DEBUG) console.log(...args); }
+
+const ALARM_PREFIX = 'monitor-'; // 与 background.js 保持一致，删除监控时清理 alarm
+
+// ---- 同步状态显示 ----
+function renderSyncBadge() {
+  if (hasChromeStorage) {
+    syncBadge.textContent = 'Chrome 同步：已启用';
+    syncBadge.classList.remove('offline');
+  } else {
+    syncBadge.textContent = '本地预览模式';
+    syncBadge.classList.add('offline');
+  }
+}
+
+// ---- URL 规范化 ----
+function normalizeUrl(url) {
+  return (url || '').trim().replace(/\/+$/, '');
+}
+
+function monitorKey(monitor) {
+  const url = normalizeUrl(monitor && monitor.url || '');
+  const type = (monitor && monitor.type) || 'page';
+  if (type === 'page') return 'page|' + url;
+  const selector = (monitor && monitor.selector) || '';
+  const attribute = (monitor && monitor.attribute) || 'text';
+  // 旧版链接监控没有 selector，区分目标全靠 targetHref/targetText。
+  // 少了这一段，同一页面上两条指向不同下载地址的旧监控会撞成同一个 key，
+  // 导入时被后者覆盖 —— 用户备份里的监控凭空少一条。
+  if (!selector) {
+    return 'element|' + url + '|' + (monitor.targetHref || '') + '|' + (monitor.targetText || '') + '|' + attribute;
+  }
+  return 'element|' + url + '|' + selector + '|' + attribute;
+}
+
+function clampInterval(value, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback || DEFAULT_INTERVAL;
+  return Math.min(10080, Math.max(1, Math.round(n)));
+}
+
+function limitMonitorValue(value, attribute) {
+  const text = value == null ? '' : String(value);
+  const max = attribute === 'href' || attribute === 'src' ? MAX_URL_VALUE_CHARS : MAX_TEXT_VALUE_CHARS;
+  return text.length > max ? text.slice(0, max) : text;
+}
+
+// id 同时充当 alarm 名、通知 id 和检查锁的键，所以一旦重复：
+//   - 两条监控共用一个 alarm，syncAlarms 只建得出一个 → 其中一条再也不会被检查；
+//   - 通知 id 相同 → 后一条直接顶掉前一条，用户看到"少了一条提醒"；
+//   - findIndex(m.id === ...) 永远只命中第一条 → 基线写到错的监控上。
+// 同一份备份可以在多台机器上与各自独立创建的监控撞 id，所以导入合并时必须
+// 过这道闸（与 background 的 ensureUniqueMonitorIds 同一套语义）。
+function ensureUniqueMonitorIds(list) {
+  const used = new Set();
+  const repaired = [];
+  for (const m of list) {
+    if (!m || typeof m !== 'object') { repaired.push(m); continue; }
+    const id = String(m.id || '');
+    if (id && !used.has(id)) {
+      used.add(id);
+      repaired.push(m);
+      continue;
+    }
+    const fresh = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    dbg('[333 Watcher] monitor id 空/重复，重新发号:', id || '(空)', '->', fresh);
+    used.add(fresh);
+    repaired.push({ ...m, id: fresh });
+  }
+  return repaired;
+}
+
+function normalizeImportedMonitor(value) {
+  if (!value || typeof value !== 'object') return null;
+  const url = normalizeUrl(value.url || '').slice(0, MAX_URL_VALUE_CHARS);
+  if (!url) return null;
+  const type = value.type === 'element' || value.type === 'link' || value.type === 'download' ? 'element' : 'page';
+  const attribute = type === 'element' ? ((value.attribute === 'href' || value.type === 'link' || value.type === 'download') ? 'href' : 'text') : '';
+  const selector = type === 'element' ? String(value.selector || '').trim() : '';
+  // 旧版链接监控没有 selector，只有 targetHref/targetText：background 的
+  // migrateData 与 checkMonitor 都为这种记录保留 checkLink 回退路径，
+  // 这里若当成无效项丢弃，用户备份里的这类监控就会静默消失。
+  const targetHref = String(value.targetHref || '').trim().slice(0, MAX_URL_VALUE_CHARS);
+  const targetText = String(value.targetText || '').trim().slice(0, 200);
+  if (selector.length > 4096) return null;
+  if (type === 'element' && !selector && !targetHref && !targetText) return null;
+  return {
+    id: String(value.id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 6))),
+    name: String(value.name || url).trim().slice(0, 60) || url,
+    url,
+    interval: clampInterval(value.interval, DEFAULT_INTERVAL),
+    type,
+    selector,
+    attribute,
+    targetHref,
+    targetText,
+    lastValue: limitMonitorValue(value.lastValue || '', attribute),
+    createdAt: value.createdAt || new Date().toISOString(),
+    updatedAt: Number(value.updatedAt) || 0,
+    lastHash: '',
+    lastCheck: '',
+    lastCheckTime: 0,
+    nextCheckTime: 0,
+    // eventSeq 参与跨设备去重的 eventKey 计算，重置成 0 会让导入后的监控
+    // 与历史里的旧事件撞上同一个 eventKey，导致该发的提醒被误吞。
+    eventSeq: Math.max(0, Number(value.eventSeq) || 0),
+    failCount: 0,
+    lastError: '',
+    invalid: false,
+    invalidReason: '',
+    invalidSince: null,
+    baselined: value.baselined !== false
+  };
+}
+
+// 把导入的监控按 monitorKey 合并进"存储里的当前列表"，并修好 id：
+//   - 命中已有 key 时保留本机 id（id 是 alarm 名 / 通知 id / 检查锁的键，
+//     换成备份里的 id 会让在途的认领和已建的 alarm 对不上）；
+//   - 整体去重 id，避免同一份备份在多台机器上与各自新建的监控撞 id。
+// 与 background 的 import-by-key 同一套语义（那边是主路径，这里是直写兜底）。
+function mergeImportedMonitors(current, normalized) {
+  const map = new Map(current.map((m) => [monitorKey(m), m]));
+  let added = 0;
+  for (const m of normalized) {
+    if (!m) continue;
+    const key = monitorKey(m);
+    const prev = map.get(key);
+    if (prev) {
+      map.set(key, { ...m, id: prev.id });
+      continue;
+    }
+    added++;
+    map.set(key, m);
+  }
+  return { merged: ensureUniqueMonitorIds([...map.values()]), added };
+}
+
+// ---- 监控存储层（chrome.storage.sync） ----
+async function getMonitors() {
+  if (hasChromeStorage) {
+    const { monitors = [] } = await chrome.storage.sync.get('monitors');
+    return Array.isArray(monitors) ? monitors : [];
+  }
+  try {
+    const parsed = JSON.parse(localStorage.getItem('monitors') || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function storageErrorMessage(err) {
+  const message = String(err && err.message || err || '');
+  if (err && err.code === 'SYNC_QUOTA') return message;
+  if (/quota|max_write|quota_bytes|storage.*full/i.test(message)) {
+    return 'Chrome 同步存储空间不足，请删除旧监控或减少监控内容后重试';
+  }
+  return message || '同步存储失败';
+}
+
+async function saveMonitors(monitors) {
+  try {
+    // 所有页面直写都从这里出去，所以在这一道闸上统一去重 id：
+    // background 在导入合并 / 启动迁移 / 新增监控三个入口都做了这件事，
+    // 页面兜底若漏掉，同一份备份在两台机器上就会留下 id 冲突的表
+    // （两条监控共用一个 alarm、共用同一个通知 id）。顺带修掉已被写坏的状态。
+    const safe = ensureUniqueMonitorIds(monitors);
+    if (hasChromeStorage) {
+      await chrome.storage.sync.set({ monitors: safe });
+    } else {
+      localStorage.setItem('monitors', JSON.stringify(safe));
+    }
+  } catch (err) {
+    const friendly = new Error(storageErrorMessage(err));
+    friendly.code = /quota|max_write|quota_bytes|storage.*full/i.test(String(err && err.message || err)) ? 'SYNC_QUOTA' : 'STORAGE_ERROR';
+    throw friendly;
+  }
+}
+
+// monitors 整键读-改-写：popup 页面和后台是两个 JS 上下文，页面直写会整键覆盖掉后台刚写入的
+// 检查基线（丢监控 / 基线回滚 / 重复通知）。因此写入统一交给 background 串行化执行；
+// fallback 供无法与 background 通信时（如本地预览直开 html）由调用方自行直写。
+async function mutateMonitorsViaBackground(msg, fallback) {
+  if (!(hasChromeStorage && chrome.runtime && chrome.runtime.sendMessage)) {
+    // 透传 fallback 的返回值：导入兜底要靠它回报真实的新增条数，
+    // 否则会退回"全部都是新增"，把覆盖掉的条数也算成新增。
+    const local = (await fallback()) || {};
+    return { ok: true, fallback: true, ...local };
+  }
+  const res = await chrome.runtime.sendMessage({ type: 'mutate-monitors', ...msg });
+  if (!res || res.ok !== true) {
+    const err = new Error((res && res.error) || '保存监控失败');
+    err.code = (res && res.code) || 'STORAGE_ERROR';
+    throw err;
+  }
+  return res;
+}
+
+// ---- 通知历史存储层（chrome.storage.sync，跨设备同步） ----
+const HISTORY_LIMIT = 50;
+const HISTORY_MAX_BYTES = 7000; // storage.sync 单 key 上限 8KB，留出余量
+
+function utf8Bytes(str) {
+  return new TextEncoder().encode(str).length;
+}
+
+async function getHistory() {
+  if (hasChromeStorage) {
+    const { history = [] } = await chrome.storage.sync.get('history');
+    return Array.isArray(history) ? history : [];
+  }
+  try {
+    return JSON.parse(localStorage.getItem('history') || '[]');
+  } catch {
+    return [];
+  }
+}
+
+async function saveHistory(history) {
+  let list = Array.isArray(history) ? history : [];
+  list = list.slice(0, HISTORY_LIMIT);
+  if (hasChromeStorage) {
+    // 超长时优先丢弃最旧记录，避免写入超过 storage.sync 的 8KB 单 key 限制
+    while (list.length > 1 && utf8Bytes(JSON.stringify(list)) > HISTORY_MAX_BYTES) {
+      list = list.slice(0, -1);
+    }
+    await chrome.storage.sync.set({ history: list });
+  } else {
+    localStorage.setItem('history', JSON.stringify(list));
+  }
+}
+
+// 清理已读通知：超过保留期后自动删除，避免历史无限累积
+const HISTORY_READ_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const CLAIM_TTL_MS = 2 * 60 * 1000;
+
+// 未完成的跨设备事件认领在 TTL 内有效，超时视为失效（发送端崩溃残留）。
+function isActiveHistoryClaim(h) {
+  if (!h || !h.pending) return false;
+  const ts = Number(h.claimAt) || new Date(h.time || 0).getTime() || 0;
+  return Date.now() - ts < CLAIM_TTL_MS;
+}
+
+async function pruneHistory() {
+  // 优先让 background 裁剪：history 是整键读-改-写，本页与后台是两个 JS 上下文，
+  // 进程内互斥锁互不生效。本页拿旧快照裁剪后整键写回，会把后台刚写入的**在途认领**
+  // 一起抹掉，arbitrateClaim 发现认领不见了就判 'skip' —— 提醒被静默吞掉。
+  if (hasChromeStorage && chrome.runtime && chrome.runtime.sendMessage) {
+    try {
+      const res = await chrome.runtime.sendMessage({ type: 'prune-history' });
+      if (res && res.ok) return;
+    } catch (e) {
+      // background 不可用时退回本页直裁剪。
+    }
+  }
+  try {
+    const history = await getHistory();
+    if (!history.length) return;
+    const cutoff = Date.now() - HISTORY_READ_RETENTION_MS;
+    const kept = history.filter((h) => {
+      // 清理过期未完成的跨设备事件认领（发送进程崩溃时可能残留）。
+      if (h && h.pending && !isActiveHistoryClaim(h)) return false;
+      if (!h.read) return true;
+      const readAt = Number(h.readAt) || new Date(h.time).getTime() || 0;
+      return readAt >= cutoff;
+    });
+    if (kept.length !== history.length) {
+      await saveHistory(kept);
+    }
+  } catch (err) {
+    console.error('[333 Watcher] history prune failed:', err);
+  }
+}
+
+// ---- 未读数显示 ----
+async function renderUnread() {
+  await pruneHistory();
+  // 尚未确认投递的事件认领不算提醒，避免失败/竞争时出现幽灵未读。
+  // 注意：`h && !h.pending` 才会剔除 null 记录；写成 `!h || !h.pending` 会把 null 留下，
+  // 随后的 h.read 就会抛 TypeError。
+  const history = (await getHistory()).filter((h) => h && !h.pending);
+  const unread = history.filter((h) => !h.read).length;
+
+  unreadBadge.textContent = unread;
+  unreadBadge.classList.toggle('hidden', unread === 0);
+  unreadBadge.title = unread > 0 ? unread + ' 条未读提醒' : '';
+
+  notifyDot.classList.toggle('hidden', unread === 0);
+  notifyCard.classList.toggle('has-unread', unread > 0);
+  markAllReadBtn.classList.toggle('hidden', unread === 0);
+  const hasRead = history.some((h) => h.read);
+  if (clearReadBtn) clearReadBtn.classList.toggle('hidden', !hasRead);
+  if (unread > 0) {
+    notifySummary.textContent = unread + ' 条未读';
+  } else if (history.length > 0) {
+    notifySummary.textContent = '共 ' + history.length + ' 条，全部已读';
+  } else {
+    notifySummary.textContent = '暂无通知';
+  }
+}
+
+// ---- 通知历史展开 ----
+historyToggle.addEventListener('click', async () => {
+  historyExpanded = !historyExpanded;
+  historyList.classList.toggle('hidden', !historyExpanded);
+  historyArrow.textContent = historyExpanded ? '▾' : '▸';
+  if (historyExpanded) {
+    await renderHistoryList();
+  }
+});
+
+markAllReadBtn.addEventListener('click', async (e) => {
+  e.stopPropagation();
+  await markAllHistoryRead();
+  if (historyExpanded) await renderHistoryList();
+});
+
+if (clearReadBtn) {
+  clearReadBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const history = await getHistory();
+    const readCount = history.filter((h) => h.read).length;
+    if (readCount === 0) return;
+    const ok = confirm('确定清除 ' + readCount + ' 条已读记录吗？未读记录将保留。');
+    if (!ok) return;
+    await clearReadHistory();
+  });
+}
+
+// 优先让 background 写 history：它的写操作共用一把互斥锁，
+// 不会把后台刚写入的事件认领整键覆盖掉。发送失败时才回退到本页直写。
+async function askBackgroundMarkRead(payload) {
+  if (!hasChromeStorage || !chrome.runtime || !chrome.runtime.sendMessage) return false;
+  try {
+    const res = await chrome.runtime.sendMessage(payload);
+    return !!(res && res.ok);
+  } catch (e) {
+    return false;
+  }
+}
+
+async function markHistoryItemRead(id) {
+  if (await askBackgroundMarkRead({ type: 'mark-history-read', id })) {
+    renderUnread();
+    if (historyExpanded) await renderHistoryList();
+    return;
+  }
+  const history = await getHistory();
+  const item = history.find((h) => h && h.id === id);
+  if (!item || item.read) return;
+  item.read = true;
+  item.readAt = Date.now();
+  await saveHistory(history);
+  renderUnread();
+}
+
+async function markAllHistoryRead() {
+  if (await askBackgroundMarkRead({ type: 'mark-all-history-read' })) {
+    renderUnread();
+    if (historyExpanded) await renderHistoryList();
+    return;
+  }
+  const history = await getHistory();
+  if (!history.some((h) => h && !h.read)) return;
+  // 不触碰尚未完成投递的事件认领，避免影响跨设备去重判断。
+  await saveHistory(history.map((h) => (h && h.pending ? h : { ...h, read: true, readAt: Date.now() })));
+  renderUnread();
+}
+
+async function clearReadHistory() {
+  try {
+    if (hasChromeStorage && chrome.runtime && chrome.runtime.sendMessage) {
+      try {
+        const res = await chrome.runtime.sendMessage({ type: 'clear-read-history' });
+        if (res && res.ok) {
+          renderUnread();
+          if (historyExpanded) await renderHistoryList();
+          return;
+        }
+      } catch (e) {
+        // fallback to direct storage
+      }
+    }
+    const history = await getHistory();
+    const kept = history.filter((h) => !h.read);
+    if (kept.length === history.length) return;
+    await saveHistory(kept);
+    renderUnread();
+    if (historyExpanded) await renderHistoryList();
+  } catch (err) {
+    console.error('[333 Watcher] clear read history failed:', err);
+  }
+}
+
+function formatTime(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+    ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+async function renderHistoryList() {
+  const history = (await getHistory()).filter((h) => h && !h.pending);
+  historyList.innerHTML = '';
+
+  if (history.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'history-empty';
+    li.textContent = '暂无通知记录';
+    historyList.appendChild(li);
+    return;
+  }
+
+  for (const h of history.slice(0, 20)) {
+    const li = document.createElement('li');
+    li.className = 'history-item' + (h.read ? '' : ' unread');
+
+    const msg = document.createElement('p');
+    msg.className = 'history-msg';
+    msg.textContent = h.message || h.name || '页面发生变化';
+    li.appendChild(msg);
+
+    const time = document.createElement('p');
+    time.className = 'history-time';
+    time.textContent = formatTime(h.time);
+    li.appendChild(time);
+
+    li.classList.add('clickable');
+    li.title = h.url ? '点击打开 ' + h.url : '点击标记已读';
+    li.addEventListener('click', async () => {
+      await markHistoryItemRead(h.id);
+      if (h.url) openUrl(h.url);
+    });
+    historyList.appendChild(li);
+  }
+}
+
+// ---- 打开网址 ----
+function openUrl(url) {
+  if (!url) return;
+  if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.create) {
+    chrome.tabs.create({ url: url });
+  } else {
+    window.open(url, '_blank');
+  }
+}
+
+async function closePagePicker() {
+  if (!hasTabsApi) return;
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab && tab.id) {
+      await chrome.tabs.sendMessage(tab.id, { type: 'w333-close-dialog' });
+    }
+  } catch {}
+}
+
+// ---- 页脚版本号 ----
+(function renderFooterVersion() {
+  const el = document.getElementById('footer-version');
+  if (!el) return;
+  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getManifest) {
+    el.textContent = '333 Watcher v' + chrome.runtime.getManifest().version;
+  }
+})();
+
+// ---- 页脚 GitHub 链接 ----
+document.getElementById('about-link').addEventListener('click', (e) => {
+  e.preventDefault();
+  openUrl('https://github.com/lijianbin2/333watch');
+});
+
+// ---- 类型切换 ----
+function syncTypeSections() {
+  const t = inputType.value;
+  elementSection.classList.toggle('hidden', t !== 'element');
+  // 指定内容模式下“保存监控”按钮多余（由页面内 picker 浮层直接保存），新增时隐藏；编辑态保留以便保存名称/间隔修改
+  if (submitBtn) {
+    const hideSave = t === 'element' && editingId === null;
+    submitBtn.classList.toggle('hidden', hideSave);
+  }
+  if (t !== 'element') {
+    // 切到“整个网页”时，清理残留的点选状态并关闭网页上的选择浮层，避免误进选元素模式
+    pickedElement = null;
+    hidePickedInfo();
+    // 异步清理，不阻塞切换
+    clearPendingPick();
+    closePagePicker();
+  }
+}
+
+inputType.addEventListener('change', syncTypeSections);
+
+// 属性标签
+function attributeLabel(attr) {
+  if (attr === 'href') return '链接地址';
+  return '文本内容';
+}
+
+// ---- 元素点选 ----
+pickElementBtn.addEventListener('click', async () => {
+  if (inputType.value !== 'element') {
+    showStatus('请先将监控类型切换为“指定内容变化”再选择元素', true);
+    return;
+  }
+  if (!hasTabsApi || !hasScripting) {
+    showStatus('本地预览模式不支持元素选择', true);
+    return;
+  }
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || !tab.id || !/^https?:/.test(tab.url || '')) {
+      showStatus('请在普通网页（http/https）上使用元素选择', true);
+      return;
+    }
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['picker.js']
+    });
+    showStatus('已注入选择器，请回到网页移动鼠标高亮元素', false);
+    setTimeout(() => window.close(), 800);
+  } catch (err) {
+    console.error('[333 Watcher] picker inject failed:', err);
+    showStatus('注入失败：' + err.message, true);
+  }
+});
+
+function showPickedInfo(pick, prefix) {
+  const label = attributeLabel(pick.attribute);
+  const sample = pick.attribute === 'href' ? (pick.href || '') : (pick.text || '');
+  pickedInfo.textContent = (prefix || '已选择：') + (pick.tagName || '元素') + ' · ' + label +
+    (sample ? ' · ' + sample.slice(0, 40) : '');
+  pickedInfo.title = pick.selector || '';
+  pickedInfo.classList.remove('hidden');
+}
+
+function hidePickedInfo() {
+  pickedInfo.classList.add('hidden');
+  pickedInfo.textContent = '';
+}
+
+async function clearPendingPick() {
+  pickedElement = null;
+  hidePickedInfo();
+  if (hasLocalStorage) {
+    try { await chrome.storage.local.remove('pendingPick'); } catch {}
+  }
+}
+
+async function loadPendingPick() {
+  if (!hasLocalStorage || editingId !== null) return false;
+  try {
+    const { pendingPick } = await chrome.storage.local.get('pendingPick');
+    if (!pendingPick || !pendingPick.selector) return false;
+    pickedElement = pendingPick;
+    inputType.value = 'element';
+    setSelectedAttribute(pendingPick.attribute);
+    inputUrl.value = pendingPick.pageUrl || '';
+    inputName.value = pendingPick.pageTitle || pendingPick.text || '';
+    syncTypeSections();
+    showPickedInfo(pendingPick);
+    dbg('[333 Watcher] pendingPick loaded:', pendingPick.selector);
+    return true;
+  } catch (err) {
+    console.error('[333 Watcher] load pendingPick failed:', err);
+    return false;
+  }
+}
+
+if (inputAttribute) inputAttribute.addEventListener('change', () => {
+  if (pickedElement) {
+    setSelectedAttribute(inputAttribute.value);
+    showPickedInfo(pickedElement);
+  }
+});
+
+// ---- 编辑态切换 ----
+function enterEditMode(monitor) {
+  editingId = monitor.id;
+  inputType.value = monitor.type || 'page';
+  setSelectedAttribute(monitor.attribute);
+  inputName.value = monitor.name || '';
+  inputUrl.value = monitor.url || '';
+  inputInterval.value = monitor.interval || DEFAULT_INTERVAL;
+
+  syncTypeSections();
+  hidePickedInfo();
+  pickedElement = null;
+
+  if (monitor.type === 'element' && monitor.selector) {
+    showPickedInfo({
+      tagName: '元素',
+      attribute: monitor.attribute || 'text',
+      text: monitor.selector,
+      href: monitor.targetHref || '',
+      selector: monitor.selector
+    }, '当前元素：');
+  }
+
+  submitBtn.textContent = '保存修改';
+  if (submitBtn) submitBtn.classList.remove('hidden');
+  editingBanner.classList.remove('hidden');
+  hideStatus();
+  hideOverwriteConfirm();
+  inputName.focus();
+}
+
+function exitEditMode() {
+  editingId = null;
+  form.reset();
+  inputType.value = 'page';
+  setSelectedAttribute('text');
+  inputInterval.value = DEFAULT_INTERVAL;
+  syncTypeSections();
+  hidePickedInfo();
+  pickedElement = null;
+  submitBtn.textContent = '保存监控';
+  editingBanner.classList.add('hidden');
+  hideOverwriteConfirm();
+}
+
+cancelEditBtn.addEventListener('click', exitEditMode);
+
+// ---- 自动填充当前标签页信息（仅新增模式，且无点选结果时） ----
+async function fillFromActiveTab() {
+  if (!hasTabsApi || editingId !== null) return;
+
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab) return;
+
+    if (tab.url && /^https?:/.test(tab.url)) {
+      inputUrl.value = tab.url;
+    }
+    if (tab.title) {
+      inputName.value = tab.title;
+    }
+  } catch (err) {
+    console.error('[333 Watcher] Failed to read active tab:', err);
+  }
+}
+
+// ---- 表单数据收集 ----
+function collectFormData() {
+  return {
+    type: inputType.value,
+    name: inputName.value.trim(),
+    url: normalizeUrl(inputUrl.value),
+    interval: clampInterval(inputInterval.value, DEFAULT_INTERVAL)
+  };
+}
+
+// ---- 保存监控 ----
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  hideStatus();
+
+  try {
+    const data = collectFormData();
+    const monitors = await getMonitors();
+
+    if (data.type === 'element' && !pickedElement && editingId === null) {
+      showStatus('请先点击「选择网页元素」在页面上点选目标', true);
+      return;
+    }
+
+    // 编辑模式：直接覆盖旧数据
+    if (editingId !== null) {
+      const idx = monitors.findIndex((m) => m.id === editingId);
+      if (idx === -1) {
+        showStatus('该监控已被删除', true);
+        exitEditMode();
+        return;
+      }
+      const old = monitors[idx];
+      const updated = {
+        ...old,
+        name: data.name,
+        url: data.url,
+        interval: data.interval,
+        type: data.type
+      };
+      const intervalForNext = clampInterval(data.interval, DEFAULT_INTERVAL);
+      const editNowTs = Date.now();
+      const editCheckedAt = new Date().toISOString();
+      if (data.type === 'element') {
+        if (pickedElement) {
+          updated.selector = pickedElement.selector;
+          updated.attribute = getSelectedAttribute();
+          updated.lastValue = attributeValue(pickedElement, updated.attribute);
+          updated.lastHash = '';
+          updated.baselined = true;
+          updated.lastCheck = editCheckedAt;
+          updated.lastCheckTime = editNowTs;
+          updated.nextCheckTime = editNowTs + intervalForNext * 60000;
+        } else {
+          updated.attribute = getSelectedAttribute(); // 保留旧 selector，只改属性也可
+          updated.lastValue = '';
+          updated.lastHash = '';
+          updated.baselined = false;
+          updated.lastCheck = '';
+          updated.lastCheckTime = 0;
+          updated.nextCheckTime = 0;
+        }
+      } else {
+        // page 类型：清掉 element 字段，立即尝试建立基线
+        updated.selector = '';
+        updated.attribute = '';
+        updated.lastValue = '';
+        const pageBaseline = await buildPageBaseline(normalizeUrl(data.url));
+        if (pageBaseline.ok) {
+          updated.lastHash = pageBaseline.hash;
+          updated.baselined = true;
+          updated.lastCheck = editCheckedAt;
+          updated.lastCheckTime = editNowTs;
+          updated.nextCheckTime = editNowTs + intervalForNext * 60000;
+        } else {
+          updated.lastHash = '';
+          updated.baselined = false;
+          updated.lastCheck = '';
+          updated.lastCheckTime = 0;
+          updated.nextCheckTime = 0;
+        }
+      }
+      const duplicate = monitors.find((m) => m.id !== editingId && monitorKey(m) === monitorKey(updated));
+      if (duplicate) {
+        showStatus('已存在相同网址、选择器和属性的监控', true);
+        return;
+      }
+      updated.targetHref = '';
+      updated.targetText = '';
+      updated.failCount = 0;
+      updated.lastError = '';
+      updated.invalid = false;
+      updated.invalidReason = '';
+      updated.invalidSince = null;
+      updated.updatedAt = editNowTs;
+      updated.eventSeq = Number(old.eventSeq) || 0;
+      monitors[idx] = updated;
+      await mutateMonitorsViaBackground({ op: 'upsert', monitor: updated }, () => saveMonitors(monitors));
+      await closePagePicker();
+      dbg('[333 Watcher] Monitor updated:', updated);
+      exitEditMode();
+      await clearPendingPick();
+      showStatus('修改已保存 ✓', false);
+      renderList();
+      return;
+    }
+
+    // 新增模式：整页按 URL 去重；元素按 URL + selector + attribute 去重。
+    const candidate = {
+      type: data.type,
+      url: data.url,
+      selector: data.type === 'element' && pickedElement ? pickedElement.selector : '',
+      attribute: data.type === 'element' ? getSelectedAttribute() : ''
+    };
+    const existing = monitors.find((m) => monitorKey(m) === monitorKey(candidate));
+    if (existing) {
+      showOverwriteConfirm(existing, data);
+      return;
+    }
+
+    await addMonitor(data);
+  } catch (err) {
+    showStatus(storageErrorMessage(err), true);
+  }
+});
+
+function attributeValue(pick, attr) {
+  if (attr === 'href') return limitMonitorValue(pick.href || '', attr);
+  return limitMonitorValue(pick.text || '', attr);
+}
+
+// ---- 新增 ----
+async function addMonitor(data) {
+  const monitors = await getMonitors();
+  const attribute = data.type === 'element' ? getSelectedAttribute() : '';
+  const interval = clampInterval(data.interval, DEFAULT_INTERVAL);
+  const nowTs = Date.now();
+  const checkedAt = new Date().toISOString();
+  let lastValue = '';
+  let lastHash = '';
+  let baselined = false;
+  let lastCheck = '';
+  let lastCheckTime = 0;
+  let nextCheckTime = 0;
+  if (data.type === 'element' && pickedElement) {
+    lastValue = attributeValue(pickedElement, attribute);
+    baselined = true;
+    lastCheck = checkedAt;
+    lastCheckTime = nowTs;
+    nextCheckTime = nowTs + interval * 60000;
+  } else if (data.type === 'page') {
+    const baseline = await buildPageBaseline(normalizeUrl(data.url));
+    if (baseline.ok) {
+      lastHash = baseline.hash;
+      baselined = true;
+      lastCheck = checkedAt;
+      lastCheckTime = nowTs;
+      nextCheckTime = nowTs + interval * 60000;
+    }
+  }
+  const monitor = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    name: data.name,
+    url: normalizeUrl(data.url),
+    interval: interval,
+    type: data.type,
+    selector: data.type === 'element' && pickedElement ? pickedElement.selector : '',
+    attribute: data.type === 'element' ? attribute : '',
+    lastValue: lastValue,
+    lastHash: lastHash,
+    baselined: baselined,
+    lastCheck: lastCheck,
+    lastCheckTime: lastCheckTime,
+    nextCheckTime: nextCheckTime,
+    createdAt: checkedAt,
+    updatedAt: nowTs,
+    eventSeq: 0,
+    failCount: 0,
+    lastError: '',
+    invalid: false,
+    invalidReason: '',
+    invalidSince: null,
+    targetHref: '',
+    targetText: ''
+  };
+  monitors.push(monitor);
+  await mutateMonitorsViaBackground({ op: 'upsert', monitor: monitor }, () => saveMonitors(monitors));
+  await closePagePicker();
+  dbg('[333 Watcher] Monitor added:', monitor);
+  await clearPendingPick();
+  showStatus('已保存 ✓', false);
+  form.reset();
+  inputType.value = 'page';
+  setSelectedAttribute('text');
+  inputInterval.value = DEFAULT_INTERVAL;
+  syncTypeSections();
+  renderList();
+
+  if (hasChromeStorage) {
+    setTimeout(() => window.close(), 400);
+  }
+}
+
+// ---- 覆盖确认 ----
+let pendingOverwrite = null;
+
+function showOverwriteConfirm(existing, data) {
+  pendingOverwrite = { existing, data };
+  overwriteConfirm.classList.remove('hidden');
+  hideStatus();
+}
+
+function hideOverwriteConfirm() {
+  pendingOverwrite = null;
+  overwriteConfirm.classList.add('hidden');
+}
+
+confirmOverwriteBtn.addEventListener('click', async () => {
+  if (!pendingOverwrite) return;
+  try {
+    const { existing, data } = pendingOverwrite;
+    hideOverwriteConfirm();
+
+    const monitors = await getMonitors();
+    const idx = monitors.findIndex((m) => m.id === existing.id);
+    if (idx !== -1) {
+      const old = monitors[idx];
+      const updated = {
+        ...old,
+        name: data.name,
+        url: data.url,
+        interval: data.interval,
+        type: data.type
+      };
+      const overwriteInterval = clampInterval(data.interval, DEFAULT_INTERVAL);
+      const overwriteNowTs = Date.now();
+      const overwriteCheckedAt = new Date().toISOString();
+      if (data.type === 'element' && pickedElement) {
+        updated.selector = pickedElement.selector;
+        updated.attribute = getSelectedAttribute();
+        updated.lastValue = attributeValue(pickedElement, updated.attribute);
+        updated.lastHash = '';
+        updated.baselined = true;
+        updated.lastCheck = overwriteCheckedAt;
+        updated.lastCheckTime = overwriteNowTs;
+        updated.nextCheckTime = overwriteNowTs + overwriteInterval * 60000;
+      } else if (data.type === 'page') {
+        updated.selector = '';
+        updated.attribute = '';
+        updated.lastValue = '';
+        const owBaseline = await buildPageBaseline(normalizeUrl(data.url));
+        if (owBaseline.ok) {
+          updated.lastHash = owBaseline.hash;
+          updated.baselined = true;
+          updated.lastCheck = overwriteCheckedAt;
+          updated.lastCheckTime = overwriteNowTs;
+          updated.nextCheckTime = overwriteNowTs + overwriteInterval * 60000;
+        } else {
+          updated.lastHash = '';
+          updated.baselined = false;
+          updated.lastCheck = '';
+          updated.lastCheckTime = 0;
+          updated.nextCheckTime = 0;
+        }
+      } else {
+        updated.lastHash = '';
+        updated.baselined = false;
+        updated.lastCheck = '';
+        updated.lastCheckTime = 0;
+        updated.nextCheckTime = 0;
+      }
+      updated.targetHref = '';
+      updated.targetText = '';
+      updated.failCount = 0;
+      updated.lastError = '';
+      updated.invalid = false;
+      updated.invalidReason = '';
+      updated.invalidSince = null;
+      updated.updatedAt = overwriteNowTs;
+      monitors[idx] = updated;
+      await mutateMonitorsViaBackground({ op: 'upsert', monitor: updated }, () => saveMonitors(monitors));
+      await closePagePicker();
+      dbg('[333 Watcher] Monitor overwritten:', updated);
+    }
+    await clearPendingPick();
+    showStatus('已覆盖保存 ✓', false);
+    form.reset();
+    inputType.value = 'page';
+    setSelectedAttribute('text');
+    inputInterval.value = DEFAULT_INTERVAL;
+    syncTypeSections();
+    renderList();
+
+    if (hasChromeStorage) {
+      setTimeout(() => window.close(), 400);
+    }
+  } catch (err) {
+    showStatus(storageErrorMessage(err), true);
+  }
+});
+
+cancelOverwriteBtn.addEventListener('click', () => {
+  hideOverwriteConfirm();
+  showStatus('已取消保存', true);
+});
+
+// ---- 监控列表渲染 ----
+function typeLabel(m) {
+  if (m.type === 'element') return '指定内容';
+  return '整个网页';
+}
+function typeShortLabel(m) {
+  if (m.type === 'element') return '元素';
+  return '整页';
+}
+function formatRelativeTime(iso) {
+  if (!iso) return '';
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return '';
+  const diff = Date.now() - t;
+  const m = Math.floor(diff / 60000);
+  if (m < 1) return '刚刚';
+  if (m < 60) return m + '分前';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + '小时前';
+  const d = Math.floor(h / 24);
+  if (d < 7) return d + '天前';
+  return new Date(iso).toLocaleDateString();
+}
+function formatShortTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return '';
+  return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
+}
+
+function monitorUpdatedAt(m) {
+  if (typeof m.updatedAt === 'number') return m.updatedAt;
+  if (typeof m.createdAt === 'string') {
+    const t = new Date(m.createdAt).getTime();
+    if (!isNaN(t)) return t;
+  }
+  return 0;
+}
+
+// 检查结果反馈：renderList 是全量重建，反馈不能只写进旧 DOM 节点，
+// 要先存下来，重建时再按监控 id 贴回新节点。
+let pendingCheckFeedback = null;
+
+// renderList 是 async 且调用方普遍不 await它（init 首屏、检查结果、增删改、
+// 测试面板都会触发），多轮重建会交错：先 await getMonitors() 的那轮可能**后**落地，
+// 用旧快照 innerHTML='' 冲掉刚落地的结果。用一条 promise 链把重建串起来，
+// 保证"最后发起的那一轮"就是最后落地的那一轮，反馈也就不会莫名其妙消失。
+let _renderChain = Promise.resolve();
+function renderList() {
+  const run = _renderChain.then(() => renderListUnlocked(), () => renderListUnlocked());
+  _renderChain = run.then(() => {}, () => {});
+  return run;
+}
+
+async function renderListUnlocked() {
+  const monitors = (await getMonitors()).slice().sort((a, b) => monitorUpdatedAt(b) - monitorUpdatedAt(a));
+  countEl.textContent = monitors.length;
+
+  listEl.innerHTML = '';
+  for (const m of monitors) {
+    const li = document.createElement('li');
+    li.className = 'watcher-item';
+    li.dataset.monitorId = m.id || '';
+
+    const info = document.createElement('div');
+    info.className = 'watcher-info';
+
+    const name = document.createElement('a');
+    name.className = 'watcher-url watcher-link';
+    name.textContent = m.name || m.url;
+    name.href = m.url || '#';
+    name.title = (m.url || '') + '（点击打开）';
+    name.addEventListener('click', (e) => {
+      e.preventDefault();
+      openUrl(m.url);
+    });
+    info.appendChild(name);
+
+    // —— 精简版 meta：单行展示关键信息，完整信息放 tooltip ——
+    const meta = document.createElement('div');
+    meta.className = 'watcher-meta';
+
+    const tag = document.createElement('span');
+    tag.className = 'meta-tag ' + (m.type === 'element' ? 'type-element' : 'type-page');
+    tag.textContent = typeShortLabel(m);
+    meta.appendChild(tag);
+
+    const intervalEl = document.createElement('span');
+    intervalEl.className = 'meta-time';
+    intervalEl.textContent = m.interval + 'm';
+    intervalEl.title = '每 ' + m.interval + ' 分钟检查一次';
+    meta.appendChild(intervalEl);
+
+    // 分隔点
+    const dot1 = document.createElement('span');
+    dot1.className = 'meta-dot';
+    dot1.textContent = '·';
+    meta.appendChild(dot1);
+
+    if (m.type === 'element' && m.selector) {
+      const sel = document.createElement('span');
+      sel.className = 'meta-selector';
+      // 完整选择器放 title，显示只取末尾一截避免过长
+      sel.textContent = m.selector;
+      sel.title = m.selector + (m.attribute ? ' [' + m.attribute + ']' : '');
+      meta.appendChild(sel);
+      const dot2 = document.createElement('span');
+      dot2.className = 'meta-dot';
+      dot2.textContent = '·';
+      meta.appendChild(dot2);
+    }
+
+    if (m.invalid) {
+      const inv = document.createElement('span');
+      inv.className = 'meta-time has-invalid';
+      inv.textContent = '已失效';
+      let invTip = m.invalidReason || '监控目标已失效';
+      if (m.invalidSince) { try { invTip += '\n自：' + new Date(m.invalidSince).toLocaleString(); } catch (e2) {} }
+      invTip += '\n请检查网址或重新拾取元素；恢复正常会自动通知';
+      inv.title = invTip;
+      meta.appendChild(inv);
+    } else if (m.lastError) {
+      const err = document.createElement('span');
+      err.className = 'meta-time has-error';
+      const fc = Number(m.failCount) || 0;
+      err.textContent = fc > 0 ? '检查失败x' + fc : '检查失败';
+      err.title = m.lastError + (fc > 0 ? '\n连续失败 ' + fc + ' 次，达到 ' + INVALID_THRESHOLD + ' 次将通知失效' : '');
+      meta.appendChild(err);
+    } else if (m.lastCheck) {
+      const t = document.createElement('span');
+      t.className = 'meta-time';
+      const rel = formatRelativeTime(m.lastCheck);
+      t.textContent = rel || formatShortTime(m.lastCheck);
+      // tooltip 显示完整时间 + 下次时间
+      let tip = '上次：' + new Date(m.lastCheck).toLocaleString();
+      if (m.nextCheckTime) tip += '\n下次：' + new Date(m.nextCheckTime).toLocaleString();
+      t.title = tip;
+      meta.appendChild(t);
+    } else {
+      const t = document.createElement('span');
+      t.className = 'meta-time';
+      t.textContent = '未检查';
+      meta.appendChild(t);
+    }
+
+    // 完整详情 tooltip 放在整行
+    let metaTip = typeLabel(m) + ' · 每' + m.interval + '分钟';
+    if (m.type === 'element' && m.selector) metaTip += '\n选择器：' + m.selector;
+    if (m.lastCheck) {
+      metaTip += '\n上次：' + new Date(m.lastCheck).toLocaleString();
+      if (m.nextCheckTime) metaTip += '\n下次：' + new Date(m.nextCheckTime).toLocaleString();
+    }
+    meta.title = metaTip;
+    info.appendChild(meta);
+
+    const feedback = document.createElement('p');
+    feedback.className = 'watcher-feedback hidden';
+    info.appendChild(feedback);
+
+    const actions = document.createElement('div');
+    actions.className = 'item-actions';
+
+    const check = document.createElement('button');
+    check.className = 'btn-check';
+    check.type = 'button';
+    check.textContent = '立即检查';
+    check.title = '立即执行一次检查';
+    check.addEventListener('click', () => checkNow(m.id, check, feedback));
+
+    const edit = document.createElement('button');
+    edit.className = 'btn-check';
+    edit.type = 'button';
+    edit.textContent = '编辑';
+    edit.title = '编辑该监控';
+    edit.addEventListener('click', () => enterEditMode(m));
+
+    const del = document.createElement('button');
+    del.className = 'btn-delete';
+    del.type = 'button';
+    del.textContent = '×';
+    del.title = '删除';
+    del.addEventListener('click', () => removeMonitor(m.id));
+
+    actions.appendChild(check);
+    actions.appendChild(edit);
+    actions.appendChild(del);
+    li.appendChild(info);
+    li.appendChild(actions);
+    listEl.appendChild(li);
+  }
+
+  // 反馈必须在本轮重建**结束之后**才贴：renderList 是 async，而调用方并不 await
+  // 它（init 的首屏渲染、检查结果、删除等都会并发触发），先完成的那一轮如果先贴
+  // 再被后完成的一轮 innerHTML='' 冲掉，结果就是"点了立即检查什么都没有"。
+  // renderList 已通过 _renderChain 串行化，因此"最后发起的一轮"必然是"最后落地的
+  // 一轮"，贴完即可消费掉标记 —— 否则标记会一直残留，之后任何无关的重建（编辑、
+  // 删除、测试面板、init）都会把上一次的旧反馈重新贴回，等于用一个 bug 换另一个。
+  if (pendingCheckFeedback) {
+    const fb = pendingCheckFeedback;
+    for (const li of Array.from(listEl.children)) {
+      const info = li.children[0];
+      if (!info) continue;
+      const target = Array.from(info.children).find(
+        (c) => c && typeof c.className === 'string' && c.className.indexOf('watcher-feedback') !== -1
+      );
+      if (!target) continue;
+      const isTarget = li.dataset && li.dataset.monitorId === fb.id;
+      if (isTarget) {
+        target.textContent = fb.text;
+        target.classList.toggle('error', !!fb.isError);
+        target.classList.remove('hidden');
+      } else {
+        // 其它行不该残留上一次检查的反馈。
+        target.textContent = '';
+        target.classList.remove('error');
+        target.classList.add('hidden');
+      }
+    }
+    pendingCheckFeedback = null;
+  }
+}
+
+// ---- 立即检查 ----
+async function checkNow(id, btn, feedback) {
+  btn.disabled = true;
+  btn.textContent = '...';
+  hideStatus();
+  showCheckFeedback(feedback, '正在检查...', false);
+  try {
+    if (!(hasChromeStorage && chrome.runtime && chrome.runtime.sendMessage)) {
+      showCheckFeedback(feedback, '本地预览模式不支持检查', true);
+      return;
+    }
+    const res = await chrome.runtime.sendMessage({ type: 'check-now', id: id });
+    if (!res || !res.ok) {
+      showCheckFeedback(feedback, '检查失败：' + ((res && res.error) || '未知错误') + '，请查看 Service Worker 日志', true);
+    } else if (res.result === 'changed') {
+      pendingCheckFeedback = { id, text: '检测到变化，已发送通知 ✓', isError: false };
+      renderUnread();
+      renderList();
+    } else if (res.result === 'not-found') {
+      pendingCheckFeedback = { id, text: '未找到目标（已尝试自愈）；连续2次失败将通知失效', isError: true };
+      renderList();
+    } else if (res.result === 'error') {
+      pendingCheckFeedback = { id, text: '网络请求失败，请检查网址或网络；连续2次失败将通知失效', isError: true };
+      renderList();
+    } else if (res.result === 'flaky') {
+      showCheckFeedback(feedback, '检测到抖动，已抑制通知（下次再确认）', false);
+    } else if (res.result === 'baselined') {
+      pendingCheckFeedback = { id, text: '首次检查：已建立基线（本次不通知）', isError: false };
+      renderList();
+    } else if (res.result === 'changed-elsewhere') {
+      pendingCheckFeedback = { id, text: '检测到变化，但已由本机或另一台设备的检查记录，未重复通知', isError: false };
+      renderList();
+    } else {
+      pendingCheckFeedback = { id, text: '暂无变化', isError: false };
+      renderList();
+    }
+  } catch (err) {
+    console.error('[333 Watcher] check-now failed:', err);
+    showCheckFeedback(feedback, '检查失败，详见 Service Worker 日志', true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '立即检查';
+  }
+}
+
+function showCheckFeedback(element, text, isError) {
+  if (!element) return;
+  listEl.querySelectorAll('.watcher-feedback').forEach((item) => {
+    item.classList.add('hidden');
+    item.classList.remove('error');
+  });
+  element.textContent = text;
+  element.classList.remove('hidden');
+  element.classList.toggle('error', !!isError);
+}
+
+// ---- 批量更新已有监控的检查间隔 ----
+bulkIntervalBtn.addEventListener('click', async () => {
+  try {
+    const monitors = await getMonitors();
+    if (!monitors.length) {
+      showStatus('还没有可更新的监控', true);
+      return;
+    }
+    const confirmed = window.confirm('确定把全部 ' + monitors.length + ' 个监控的检查间隔改为 500 分钟吗？');
+    if (!confirmed) return;
+
+    const updated = monitors.map((m) => ({ ...m, interval: DEFAULT_INTERVAL }));
+    await mutateMonitorsViaBackground({ op: 'set-interval', interval: DEFAULT_INTERVAL }, () => saveMonitors(updated));
+    renderList();
+    showStatus('已将 ' + updated.length + ' 个监控的检查间隔改为 500 分钟 ✓', false);
+  } catch (err) {
+    showStatus(storageErrorMessage(err), true);
+  }
+});
+
+// ---- 测试通知 ----
+const testNotifyBtn = document.getElementById('test-notify-btn');
+testNotifyBtn.addEventListener('click', async () => {
+  testNotifyBtn.disabled = true;
+  hideStatus();
+  try {
+    if (!(hasChromeStorage && chrome.runtime && chrome.runtime.sendMessage)) {
+      showStatus('本地预览模式不支持通知', true);
+      return;
+    }
+    const res = await chrome.runtime.sendMessage({ type: 'test-notification' });
+    if (res && res.ok) {
+      showStatus('测试通知已发送（ID: ' + res.notificationId + '），若未弹出请检查系统通知设置', false);
+    } else {
+      showStatus('通知发送失败：' + ((res && res.error) || '未知错误') + '（可能通知权限不足）', true);
+    }
+  } catch (err) {
+    console.error('[333 Watcher] test notification failed:', err);
+    showStatus('通知发送失败：' + err.message, true);
+  } finally {
+    testNotifyBtn.disabled = false;
+  }
+});
+
+async function removeMonitor(id) {
+  try {
+    const monitors = await getMonitors();
+    const target = monitors.find((m) => m.id === id);
+    if (!target) return;
+    // 只删除用户点击的这一条；同一网址的其他元素监控应继续运行。
+    const kept = monitors.filter((m) => m.id !== id);
+    await mutateMonitorsViaBackground({ op: 'remove', id: id }, () => saveMonitors(kept));
+    // 立即清除对应 alarm，防止删除后仍被调度检查
+    if (typeof chrome !== 'undefined' && chrome.alarms) {
+      const removed = monitors.filter((m) => !kept.includes(m));
+      for (const m of removed) {
+        try { await chrome.alarms.clear(ALARM_PREFIX + m.id); } catch {}
+      }
+    }
+    if (editingId === id) exitEditMode();
+    renderList();
+  } catch (err) {
+    showStatus(storageErrorMessage(err), true);
+  }
+}
+
+function showStatus(text, isError) {
+  statusMsg.textContent = text;
+  statusMsg.classList.remove('hidden');
+  statusMsg.classList.toggle('error', !!isError);
+}
+
+function hideStatus() {
+  statusMsg.classList.add('hidden');
+  statusMsg.classList.remove('error');
+}
+
+// ---- 历史变化时实时刷新未读徽标 ----
+if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'sync' && changes.history) {
+      renderUnread();
+    }
+  });
+}
+
+// ---- 数据迁移：导出 / 导入（本地版 ↔ 商店版） ----
+const exportBtn = document.getElementById('export-btn');
+const importToggleBtn = document.getElementById('import-toggle-btn');
+const importBox = document.getElementById('import-box');
+const importArea = document.getElementById('import-area');
+const importConfirmBtn = document.getElementById('import-confirm-btn');
+const migrateStatus = document.getElementById('migrate-status');
+
+function showMigrateStatus(text, isError) {
+  migrateStatus.textContent = text;
+  migrateStatus.classList.remove('hidden');
+  migrateStatus.classList.toggle('error', !!isError);
+}
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {}
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch { return false; }
+}
+
+exportBtn.addEventListener('click', async () => {
+  try {
+    const monitors = await getMonitors();
+    const payload = JSON.stringify({
+      app: '333-watcher',
+      exportedAt: new Date().toISOString(),
+      monitors: monitors
+    }, null, 2);
+    const ok = await copyText(payload);
+    if (ok) {
+      showMigrateStatus('已复制导出内容，请到另一个版本点击「导入设置」粘贴后导入');
+    } else {
+      console.log('[333 Watcher] 导出数据:', payload);
+      showMigrateStatus('复制失败，请从控制台复制导出的 JSON', true);
+    }
+  } catch (err) {
+    showMigrateStatus('导出失败：' + err.message, true);
+  }
+});
+
+importToggleBtn.addEventListener('click', () => {
+  const willShow = importBox.classList.contains('hidden');
+  importBox.classList.toggle('hidden', !willShow);
+  if (willShow) importArea.focus();
+});
+
+importConfirmBtn.addEventListener('click', async () => {
+  try {
+    const data = JSON.parse(importArea.value.trim());
+    if (!data || !Array.isArray(data.monitors)) {
+      throw new Error('格式不正确，请粘贴完整的导出内容');
+    }
+    const imported = data.monitors;
+    const normalized = [];
+    let skipped = 0;
+    for (const raw of imported) {
+      const m = normalizeImportedMonitor(raw);
+      if (!m) { skipped++; continue; }
+      normalized.push(m);
+    }
+    // 合并由 background 用“存储里的最新列表”完成，避免页面旧快照整键覆盖。
+    const res = await mutateMonitorsViaBackground({ op: 'import-by-key', monitors: normalized }, async () => {
+      const current = await getMonitors();
+      const { merged, added } = mergeImportedMonitors(current, normalized);
+      await saveMonitors(merged);
+      return { added };
+    });
+    const added = res && res.added != null ? res.added : normalized.length;
+    renderList();
+    showMigrateStatus('导入成功：有效 ' + (imported.length - skipped) + ' 条，新增 ' + added + (skipped ? '，跳过无效 ' + skipped + ' 条' : ''));
+  } catch (err) {
+    showMigrateStatus('导入失败：' + err.message, true);
+  }
+});
+
+// ---- 初始化 ----
+(async function init() {
+  renderSyncBadge();
+  renderUnread();
+  renderList();
+  const hasPick = await loadPendingPick();
+  if (!hasPick) {
+    fillFromActiveTab();
+  }
+  syncTypeSections();
+})();
+// ================= 🧪 测试模式 (v0.6.17 text/href 双路) =================
+const TEST_URL_TEXT = '333-test://text';
+const TEST_URL_HREF = '333-test://link';
+const testModeToggle = document.getElementById('test-mode-toggle');
+const testModeBody = document.getElementById('test-mode-body');
+const testModeArrow = document.getElementById('test-mode-arrow');
+const testCreateTextBtn = document.getElementById('test-create-text-btn');
+const testCreateHrefBtn = document.getElementById('test-create-href-btn');
+const testChangeTextBtn = document.getElementById('test-change-text-btn');
+const testChangeHrefBtn = document.getElementById('test-change-href-btn');
+const testCheckTextBtn = document.getElementById('test-check-text-btn');
+const testCheckHrefBtn = document.getElementById('test-check-href-btn');
+const testClearBtn = document.getElementById('test-clear-btn');
+const testStatus = document.getElementById('test-status');
+const testTextDetail = document.getElementById('test-text-detail');
+const testHrefDetail = document.getElementById('test-href-detail');
+
+function showTestStatus(text, isError) {
+  if (!testStatus) return;
+  testStatus.textContent = text;
+  testStatus.classList.remove('hidden');
+  testStatus.classList.toggle('error', !!isError);
+}
+function hideTestStatus(){ if(testStatus) testStatus.classList.add('hidden'); }
+
+async function refreshTestDetails(){
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'test-get-status' });
+    if (!res || !res.ok) return;
+    const curText = res.curText || res.cur;
+    const curHref = res.curHref;
+    const textMon = res.textMonitor;
+    const hrefMon = res.hrefMonitor;
+    if (testTextDetail) {
+      if (!textMon) testTextDetail.textContent = '当前文本: ' + curText + '\n文本监控: 未创建（点“创建文字监控”）';
+      else {
+        const last = textMon.lastValue || '(空)';
+        testTextDetail.textContent = '当前文本: ' + curText + '\n记录值: ' + last + '\n' + (curText !== last ? '● 下次检查→已变化': '○ 一致→无变化') + '\n上次: ' + (textMon.lastCheck || '从未') + ' · ' + (textMon.interval||1) + '分钟';
+      }
+      testTextDetail.classList.remove('hidden');
+    }
+    if (testHrefDetail) {
+      if (!hrefMon) testHrefDetail.textContent = '当前链接: ' + curHref + '\n链接监控: 未创建（点“创建链接监控”）';
+      else {
+        const last = hrefMon.lastValue || '(空)';
+        testHrefDetail.textContent = '当前链接: ' + curHref + '\n记录值: ' + last + '\n' + (curHref !== last ? '● 下次检查→已变化': '○ 一致→无变化') + '\n上次: ' + (hrefMon.lastCheck || '从未') + ' · ' + (hrefMon.interval||1) + '分钟';
+      }
+      testHrefDetail.classList.remove('hidden');
+    }
+  } catch(e){}
+}
+
+if (testModeToggle && testModeBody) {
+  testModeToggle.addEventListener('click', () => {
+    testModeBody.classList.toggle('hidden');
+    if (testModeArrow) testModeArrow.classList.toggle('open', !testModeBody.classList.contains('hidden'));
+    if (!testModeBody.classList.contains('hidden')) refreshTestDetails();
+  });
+}
+async function handleCreate(attr){
+  const btn = attr==='href' ? testCreateHrefBtn : testCreateTextBtn;
+  if(btn) btn.disabled=true;
+  hideTestStatus();
+  try{
+    const res = await chrome.runtime.sendMessage({ type: 'test-create', attribute: attr });
+    if(res && res.ok){
+      const label = attr === 'href' ? '"链接"' : '"文字"';
+      showTestStatus(label + (res.mode === 'exists' ? ' 监控已存在 ✓' : ' 监控已创建 ✓ 1分钟间隔'), false);
+      renderList(); renderUnread(); refreshTestDetails();
+    } else showTestStatus('创建失败: '+((res&&res.error)||'未知'), true);
+  }catch(e){ showTestStatus('创建失败: '+e.message, true); }
+  if(btn) btn.disabled=false;
+}
+async function handleSimulate(attr){
+  const btn = attr==='href' ? testChangeHrefBtn : testChangeTextBtn;
+  if(btn) btn.disabled=true;
+  try{
+    const res = await chrome.runtime.sendMessage({ type: 'test-simulate-change', attribute: attr });
+    if(res && res.ok){ showTestStatus((attr==='href')?'已模拟链接变化: ':'已模拟文字变化: ' + res.prev + ' → ' + res.cur + ' ，点“立即检查”应收到通知', false); refreshTestDetails(); }
+    else showTestStatus('模拟失败', true);
+  }catch(e){ showTestStatus('模拟失败: '+e.message, true); }
+  if(btn) btn.disabled=false;
+}
+async function handleCheck(attr){
+  const btn = attr==='href' ? testCheckHrefBtn : testCheckTextBtn;
+  if(btn){ btn.disabled=true; var old=btn.textContent; btn.textContent='检查中...'; }
+  hideTestStatus();
+  try{
+    const st = await chrome.runtime.sendMessage({ type: 'test-get-status' });
+    const m = (attr==='href') ? st.hrefMonitor : st.textMonitor;
+    if(!m){ showTestStatus((attr==='href')?'请先创建链接监控':'请先创建文字监控', true); }
+    else {
+      const res = await chrome.runtime.sendMessage({ type: 'check-now', id: m.id });
+      if(!res || !res.ok) showTestStatus('检查失败: '+((res&&res.error)||'未知'), true);
+      else if(res.result==='changed'){ showTestStatus((attr==='href')?'🔗 链接已变化，已发通知 ✓':'📄 文字已变化，已发通知 ✓', false); renderUnread(); renderList(); }
+      else if(res.result==='baselined') showTestStatus('首次检查：已建立基线（本次不通知）', false);
+else if(res.result==='changed-elsewhere') showTestStatus('变化已由其他检查记录，未重复通知', false);
+      else if(res.result==='unchanged') showTestStatus('暂无变化（需先点“模拟变化”）', true);
+      else showTestStatus('结果: '+res.result, res.result==='error');
+      refreshTestDetails();
+    }
+  }catch(e){ showTestStatus('检查失败: '+e.message, true); }
+  if(btn){ btn.disabled=false; btn.textContent=old; }
+}
+if(testCreateTextBtn) testCreateTextBtn.addEventListener('click', ()=>handleCreate('text'));
+if(testCreateHrefBtn) testCreateHrefBtn.addEventListener('click', ()=>handleCreate('href'));
+if(testChangeTextBtn) testChangeTextBtn.addEventListener('click', ()=>handleSimulate('text'));
+if(testChangeHrefBtn) testChangeHrefBtn.addEventListener('click', ()=>handleSimulate('href'));
+if(testCheckTextBtn) testCheckTextBtn.addEventListener('click', ()=>handleCheck('text'));
+if(testCheckHrefBtn) testCheckHrefBtn.addEventListener('click', ()=>handleCheck('href'));
+if(testClearBtn){
+  testClearBtn.addEventListener('click', async ()=>{
+    if(!confirm('清理所有测试监控和测试值？')) return;
+    try{ const res=await chrome.runtime.sendMessage({type:'test-clear'}); showTestStatus('已清理 '+(res.removed||0)+' 条测试监控', false); renderList(); refreshTestDetails(); }catch(e){ showTestStatus('清理失败: '+e.message, true); }
+  });
+}
+try{ refreshTestDetails(); }catch{}
+

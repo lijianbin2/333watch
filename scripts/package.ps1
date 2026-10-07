@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
-$version = '0.6.50'
 $root = Split-Path -Parent $PSScriptRoot
+$manifest = Get-Content (Join-Path $root 'manifest.json') -Raw | ConvertFrom-Json
+$version = $manifest.version
 $zip = Join-Path (Split-Path -Parent $root) "333-watcher-$version.zip"
 $files = @(
   '.gitignore',
@@ -21,9 +22,13 @@ try {
   foreach ($f in $files) {
     if (-not (Test-Path -LiteralPath $f)) { throw "missing package file: $f" }
   }
+  # exclude sensitive
+  if (Test-Path -LiteralPath '.cws-credentials') {
+    Write-Warning "exclude .cws-credentials from package (sensitive)"
+  }
   if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
   Compress-Archive -Path $files -DestinationPath $zip -CompressionLevel Optimal -Force
-  Write-Output "created: $zip"
+  Write-Output "created: $zip ($version)"
   tar -tf $zip
 } finally {
   Pop-Location

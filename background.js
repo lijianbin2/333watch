@@ -1,10 +1,12 @@
 /**
  * 333 Watcher - Background Service Worker (v0.6.50 - 安装/启动链路逐步兜底)
+ * @module background
  *
- * 监控类型：
- * - page：整页 HTML hash 对比
- * - link：下载链接监控（正则解析 a 标签，旧版方式，保留兼容）
- * - element：网页元素监控（offscreen document 解析 HTML + querySelector）
+ * 区域导航（×10）：
+ *  1. 常量/工具  2. 存储(监控/历史/已投递)  3. 认领/仲裁  4. 获取/解析  5. 检查流程
+ *  6. 通知  7. 角标防抖  8. 启动补检  9. 消息路由  10. 生命周期
+ *
+ * 监控类型： page / link / element（offscreen）
  */
 
 const DEBUG = false; // 发布版关闭信息日志，调试时改为 true
@@ -464,6 +466,9 @@ async function savePickedMonitor(pick, attribute) {
 
     if (idx !== -1) {
       const old = monitors[idx];
+      const nowTs = Date.now();
+      const checkedAt = new Date().toISOString();
+      const interval = Math.max(1, Number(old.interval) || DEFAULT_INTERVAL);
       monitors[idx] = {
         ...old,
         name: name,
@@ -475,18 +480,24 @@ async function savePickedMonitor(pick, attribute) {
         lastHash: '',
         targetHref: '',
         targetText: '',
-        updatedAt: Date.now(),
+        updatedAt: nowTs,
         eventSeq: Number(old.eventSeq) || 0,
         failCount: 0,
         lastError: '',
         invalid: false,
         invalidReason: '',
         invalidSince: null,
-        baselined: false
+        // 创建即基线：element 拾取时已有精确值，首检即可判定变化，不再浪费一次“仅基线”周期
+        baselined: true,
+        lastCheck: checkedAt,
+        lastCheckTime: nowTs,
+        nextCheckTime: nowTs + interval * 60000
       };
       return { mode: 'updated', id: old.id };
     }
 
+    const nowTs = Date.now();
+    const checkedAt = new Date().toISOString();
     const monitor = {
       id: mintMonitorId(),
       name: name,
@@ -496,19 +507,20 @@ async function savePickedMonitor(pick, attribute) {
       selector: pick.selector,
       attribute: attr,
       lastValue: lastValue,
-      createdAt: new Date().toISOString(),
-      updatedAt: Date.now(),
+      createdAt: checkedAt,
+      updatedAt: nowTs,
       eventSeq: 0,
       failCount: 0,
       lastError: '',
       invalid: false,
       invalidReason: '',
       invalidSince: null,
-      baselined: false,
+      // 创建即基线：首检即可判定变化
+      baselined: true,
       lastHash: '',
-      lastCheck: '',
-      lastCheckTime: 0,
-      nextCheckTime: 0
+      lastCheck: checkedAt,
+      lastCheckTime: nowTs,
+      nextCheckTime: nowTs + DEFAULT_INTERVAL * 60000
     };
     monitors.push(monitor);
     return { mode: 'added', id: monitor.id };
@@ -1796,6 +1808,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const targetUrl = isHref ? TEST_URL_PREFIX + 'link' : TEST_URL_PREFIX + 'text';
       const legacyUrl = TEST_URL_PREFIX + 'demo';
       const cur = await getTestValue(attr);
+      const nowTs = Date.now();
+      const checkedAt = new Date().toISOString();
       const monitor = {
         id: mintMonitorId(),
         name: isHref ? '🔍 测试监控-链接' : '📄 测试监控-文字',
@@ -1805,13 +1819,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         selector: isHref ? 'a#test-link' : '#test-value',
         attribute: attr,
         lastValue: limitMonitorValue(cur, attr),
-        baselined: false,
-        createdAt: new Date().toISOString(),
-        updatedAt: Date.now(),
+        baselined: true,
+        createdAt: checkedAt,
+        updatedAt: nowTs,
         lastHash: '',
-        lastCheck: '',
-        lastCheckTime: 0,
-        nextCheckTime: 0,
+        lastCheck: checkedAt,
+        lastCheckTime: nowTs,
+        nextCheckTime: nowTs + 1 * 60000,
         eventSeq: 0
       };
       // 去重判断与写入必须在同一临界区内，否则并发下会建出两条同目标测试监控。
@@ -2098,6 +2112,16 @@ function utf8Bytes(str) {
   return new TextEncoder().encode(str).length;
 }
 
+async function getBytesInUse(key){
+  try{
+    if(chrome.storage.sync.getBytesInUse){
+      const v=await chrome.storage.sync.getBytesInUse(key);
+      if(typeof v==='number') return v;
+    }
+  }catch(e){}
+  return null;
+}
+
 async function getHistory() {
   const data = await chrome.storage.sync.get(HISTORY_KEY);
   return Array.isArray(data[HISTORY_KEY]) ? data[HISTORY_KEY] : [];
@@ -2107,8 +2131,15 @@ async function saveHistory(history) {
   let list = Array.isArray(history) ? history : [];
   list = list.slice(0, HISTORY_LIMIT);
   // 超长时优先丢弃最旧记录，避免写入超过 storage.sync 的 8KB 单 key 限制
-  while (list.length > 1 && utf8Bytes(JSON.stringify(list)) > HISTORY_MAX_BYTES) {
-    list = list.slice(0, -1);
+  while(list.length>1){
+    let bytes;
+    try{
+      const used=await getBytesInUse(HISTORY_KEY);
+      const estimated=utf8Bytes(JSON.stringify(list));
+      bytes=typeof used==='number'?Math.max(used,estimated):estimated;
+    }catch(e){ bytes=utf8Bytes(JSON.stringify(list)); }
+    if(bytes<=HISTORY_MAX_BYTES) break;
+    list=list.slice(0,-1);
   }
   await chrome.storage.sync.set({ [HISTORY_KEY]: list });
 }
@@ -2249,20 +2280,25 @@ async function updateBadge() {
   await chrome.action.setBadgeText({ text: unread > 0 ? String(unread) : '' });
 }
 
-// 历史变化时自动刷新角标（含 popup 标记已读后的清零）
+let _badgeTimer=null;
+function scheduleBadgeUpdate(immediate){
+  if(immediate){
+    if(_badgeTimer){ clearTimeout(_badgeTimer); _badgeTimer=null; }
+    updateBadge().catch((err)=>console.error('[333 Watcher] updateBadge failed:', err && err.message));
+    return;
+  }
+  if(_badgeTimer) clearTimeout(_badgeTimer);
+  _badgeTimer=setTimeout(()=>{ _badgeTimer=null; updateBadge().catch((err)=>console.error('[333 Watcher] updateBadge failed:', err && err.message)); },300);
+}
+
+// 历史变化时自动刷新角标（含 popup 标记已读后的清零） — 防抖 300ms
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'sync' && changes[HISTORY_KEY]) {
-    // 必须兜住：updateBadge 里有 pruneHistory / storage.sync.get / setBadgeText
-    // 三处都可能 reject（配额、瞬时存储错误、扩展正在卸载）。监听器里没人接的
-    // rejection 只会变成一条没有上下文的 "Uncaught (in promise)"，
-    // 角标静默不刷新却看不出原因。同 syncAlarms 的处理方式。
-    updateBadge().catch((err) => console.error('[333 Watcher] updateBadge failed:', err && err.message));
+    scheduleBadgeUpdate(false);
   }
 });
 
-const runBadgeUpdate = () => {
-  updateBadge().catch((err) => console.error('[333 Watcher] updateBadge failed:', err && err.message));
-};
+const runBadgeUpdate = () => scheduleBadgeUpdate(true);
 chrome.runtime.onStartup.addListener(runBadgeUpdate);
 chrome.runtime.onInstalled.addListener(runBadgeUpdate);
 setTimeout(runBadgeUpdate, 0);
@@ -2281,19 +2317,15 @@ async function catchUpChecks() {
     return;
   }
   const now = Date.now();
-  for (const m of monitors) {
-    const next = Number(m.nextCheckTime) || 0;
-    if (next <= now) {
+  const overdue=monitors.filter(m=> (Number(m.nextCheckTime)||0) <= now);
+  for(let i=0;i<overdue.length;i+=3){
+    const batch=overdue.slice(i,i+3);
+    const results=await Promise.allSettled(batch.map(async (m)=>{
       dbg('[333 Watcher] catch-up check (overdue):', m.url);
-      // 逐个隔离：单个监控抛错（网络异常、存储配额、通知链路）不得让其余
-      // 逾期监控在本次开机补检中被静默跳过。
-      try {
-        await checkMonitor(m);
-      } catch (err) {
-        console.error('[333 Watcher] catch-up check failed:', m.id, err && err.message);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
+      try{ await checkMonitor(m); }catch(err){ console.error('[333 Watcher] catch-up check failed:', m.id, err && err.message); throw err; }
+    }));
+    void results;
+    if(i+3<overdue.length) await new Promise((r)=>setTimeout(r,100));
   }
 }
 

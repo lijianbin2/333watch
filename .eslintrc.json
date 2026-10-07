@@ -1,0 +1,17 @@
+{
+  "env": { "browser": true, "webextensions": true, "es2022": true, "node": true },
+  "extends": "eslint:recommended",
+  "parserOptions": { "ecmaVersion": 2022, "sourceType": "script" },
+  "globals": { "chrome": "readonly" },
+  "rules": {
+    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
+    "no-console": "off",
+    "eqeqeq": ["warn", "smart"],
+    "no-var": "warn",
+    "prefer-const": "warn"
+  },
+  "overrides": [
+    { "files": ["tests/**/*.cjs"], "env": { "node": true }, "rules": { "no-console": "off" } },
+    { "files": ["scripts/**/*.mjs"], "parserOptions": { "sourceType": "module" } }
+  ]
+}

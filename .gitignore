@@ -38,3 +38,14 @@ tab6-*.txt
 session-check*.txt
 newtab-debug*.txt
 
+
+# Chrome Web Store credentials (never commit)
+.cws-credentials/
+*.bak
+
+
+# 优化过程临时补丁文件（不入库）
+patch-*.mjs
+work-*.txt
+work-*.mjs
+*.pre-opt
