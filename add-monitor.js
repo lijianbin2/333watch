@@ -48,6 +48,7 @@ const notifyCard = document.getElementById('notify-card');
 const notifyDot = document.getElementById('notify-dot');
 const notifySummary = document.getElementById('notify-summary');
 const markAllReadBtn = document.getElementById('mark-all-read-btn');
+const openAllUnreadBtn = document.getElementById('open-all-unread-btn');
 const clearReadBtn = document.getElementById('clear-read-btn');
 const historyToggle = document.getElementById('history-toggle');
 const historyList = document.getElementById('history-list');
@@ -437,6 +438,7 @@ async function renderUnread() {
   notifyDot.classList.toggle('hidden', unread === 0);
   notifyCard.classList.toggle('has-unread', unread > 0);
   markAllReadBtn.classList.toggle('hidden', unread === 0);
+  if (openAllUnreadBtn) openAllUnreadBtn.classList.toggle('hidden', unread === 0);
   const hasRead = history.some((h) => h.read);
   if (clearReadBtn) clearReadBtn.classList.toggle('hidden', !hasRead);
   if (unread > 0) {
@@ -463,6 +465,13 @@ markAllReadBtn.addEventListener('click', async (e) => {
   await markAllHistoryRead();
   if (historyExpanded) await renderHistoryList();
 });
+
+if (openAllUnreadBtn) {
+  openAllUnreadBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    await openAllUnread();
+  });
+}
 
 if (clearReadBtn) {
   clearReadBtn.addEventListener('click', async (e) => {
@@ -514,6 +523,69 @@ async function markAllHistoryRead() {
   // 不触碰尚未完成投递的事件认领，避免影响跨设备去重判断。
   await saveHistory(history.map((h) => (h && h.pending ? h : { ...h, read: true, readAt: Date.now() })));
   renderUnread();
+}
+
+function isOpenableUrl(url) {
+  if (typeof url !== 'string') return false;
+  var u = url.trim();
+  if (!u) return false;
+  if (/^333-test:\/\//i.test(u)) return false;
+  return /^https?:\/\//i.test(u);
+}
+
+async function openAllUnread() {
+  var list = [];
+  try {
+    list = (await getHistory()).filter((h) => h && !h.pending && !h.read);
+  } catch (err) {
+    return;
+  }
+  var openable = list.filter((h) => h && isOpenableUrl(h.url));
+  if (openable.length === 0) return;
+  var seen = {};
+  var urls = [];
+  var i;
+  for (i = 0; i < openable.length; i++) {
+    var u = String(openable[i].url || '').trim();
+    var key = u.replace(/\/+$/, "");
+    if (seen[key]) continue;
+    seen[key] = true;
+    urls.push(u);
+  }
+  if (urls.length === 0) return;
+  if (urls.length > 10) {
+    var ok = confirm('将打开 ' + urls.length + ' 个网页，继续吗？');
+    if (!ok) return;
+  }
+  if (hasChromeStorage && chrome.runtime && chrome.runtime.sendMessage) {
+    try {
+      var res = await chrome.runtime.sendMessage({ type: 'open-unread-urls' });
+      if (res && res.ok) {
+        renderUnread();
+        if (historyExpanded) await renderHistoryList();
+        return;
+      }
+    } catch (err2) {
+    }
+  }
+  var opened = 0;
+  for (i = 0; i < urls.length; i++) {
+    try {
+      if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.create) {
+        await chrome.tabs.create({ url: urls[i], active: i === 0 });
+      } else {
+        window.open(urls[i], '_blank');
+      }
+      opened++;
+    } catch (err3) {
+    }
+  }
+  if (opened > 0) {
+    await markAllHistoryRead();
+  } else {
+    renderUnread();
+  }
+  if (historyExpanded) await renderHistoryList();
 }
 
 async function clearReadHistory() {

@@ -2025,6 +2025,76 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // 一键打开全部未读：popup 关闭后仍能继续开完；标记已读走同一把 history 互斥锁。
+  if (msg.type === "open-unread-urls") {
+    (async () => {
+      try {
+        var isOpenable = function (u) {
+          if (typeof u !== "string") return false;
+          var s = u.trim();
+          if (!s) return false;
+          if (s.indexOf("333-test://") === 0) return false;
+          return /^https?:\/\//i.test(s);
+        };
+        var normalizeKey = function (u) {
+          return String(u || "").trim().replace(/\/+$/, "");
+        };
+        var history = await getHistory();
+        var unread = history.filter((h) => h && !h.pending && !h.read && isOpenable(h.url));
+        var seen = {};
+        var urls = [];
+        var i;
+        for (i = 0; i < unread.length; i++) {
+          var u = String(unread[i].url).trim();
+          var key = normalizeKey(u);
+          if (seen[key]) continue;
+          seen[key] = true;
+          urls.push(u);
+        }
+        if (urls.length === 0) {
+          await updateBadge();
+          sendResponse({ ok: true, opened: 0, total: 0 });
+          return;
+        }
+        var openedKeys = {};
+        var opened = 0;
+        for (i = 0; i < urls.length; i++) {
+          try {
+            await chrome.tabs.create({ url: urls[i], active: i === 0 });
+            opened++;
+            openedKeys[normalizeKey(urls[i])] = true;
+          } catch (err) {
+            console.error("[333 Watcher] open unread url failed:", urls[i], err && err.message);
+          }
+        }
+        var updated = 0;
+        if (opened > 0) {
+          var res = await withHistoryLock(async () => {
+            var fresh = await getHistory();
+            var n = 0;
+            for (var m = 0; m < fresh.length; m++) {
+              var h = fresh[m];
+              if (h && !h.pending && !h.read && openedKeys[normalizeKey(h.url)]) {
+                h.read = true;
+                h.readAt = Date.now();
+                n++;
+              }
+            }
+            if (n > 0) await saveHistory(fresh);
+            return { updated: n };
+          });
+          updated = res.updated;
+        }
+        await updateBadge();
+        sendResponse({ ok: true, opened: opened, total: urls.length, updated: updated });
+      } catch (err) {
+        console.error("[333 Watcher] open unread urls failed:", err && err.message);
+        sendResponse({ ok: false, error: err.message });
+      }
+    })();
+    return true;
+  }
+
   // 元素点选后直接在页面内保存（来自 picker.js 浮层）
   if (msg.type === 'save-element-monitor') {
     (async () => {

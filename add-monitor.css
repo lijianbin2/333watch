@@ -736,6 +736,16 @@ body {
   cursor: pointer;
 }
 
+.open-all-btn {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--primary-link);
+  cursor: pointer;
+}
+.open-all-btn:hover {
+  color: var(--accent-cyan);
+  text-decoration: underline;
+}
 .mark-all-read:hover {
   color: var(--accent-cyan);
   text-decoration: underline;
