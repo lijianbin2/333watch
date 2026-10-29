@@ -684,9 +684,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  flex-wrap: wrap;
-  row-gap: 6px;
+  gap: 4px;
   width: 100%;
   padding: 0;
   font-size: 13px;
@@ -699,7 +697,8 @@ body {
 .notify-card-title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
+  font-size: 12px;
   font-weight: 600;
   flex: 1 1 auto;
   min-width: 0;
@@ -707,7 +706,7 @@ body {
 }
 
 .notify-summary {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 400;
   color: var(--text-muted);
   min-width: 0;
@@ -725,7 +724,7 @@ body {
   align-items: center;
   margin-left: auto;
   flex-shrink: 0;
-  gap: 6px;
+  gap: 2px;
   white-space: nowrap;
 }
 
@@ -753,13 +752,13 @@ body {
 }
 
 .mark-all-read {
-  font-size: 11px;
+  font-size: 10px;
   color: var(--primary-link);
   cursor: pointer;
 }
 
 .open-all-btn {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
   color: var(--primary-link);
   cursor: pointer;
@@ -774,7 +773,7 @@ body {
 }
 
 .clear-read-btn {
-  font-size: 11px;
+  font-size: 10px;
   color: var(--text-muted);
   cursor: pointer;
 }
