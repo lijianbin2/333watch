@@ -52,6 +52,7 @@ const openAllUnreadBtn = document.getElementById('open-all-unread-btn');
 const clearReadBtn = document.getElementById('clear-read-btn');
 const historyToggle = document.getElementById('history-toggle');
 const historyList = document.getElementById('history-list');
+const historyFooter = document.getElementById('history-footer');
 const historyArrow = document.getElementById('history-arrow');
 const bulkIntervalBtn = document.getElementById('bulk-interval-btn');
 
@@ -439,11 +440,12 @@ async function renderUnread() {
   notifyCard.classList.toggle('has-unread', unread > 0);
   markAllReadBtn.classList.toggle('hidden', unread === 0);
   if (openAllUnreadBtn) {
-    openAllUnreadBtn.classList.toggle('hidden', unread === 0 || !historyExpanded);
+    openAllUnreadBtn.classList.toggle('hidden', unread === 0);
     if (unread > 0) openAllUnreadBtn.textContent = '打开全部未读（' + unread + '）';
   }
   const hasRead = history.some((h) => h.read);
   if (clearReadBtn) clearReadBtn.classList.toggle('hidden', !hasRead);
+  if (historyFooter) historyFooter.classList.toggle('hidden', !historyExpanded || (unread === 0 && !hasRead));
   if (unread > 0) {
     notifySummary.textContent = unread + ' 条未读';
   } else if (history.length > 0) {

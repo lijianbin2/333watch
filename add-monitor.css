@@ -662,6 +662,20 @@ body {
   text-align: center;
 }
 
+.history-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.history-footer .btn-ghost {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ===== 通知卡片（顶部） ===== */
 .notify-card {
   display: flex;
@@ -754,9 +768,7 @@ body {
   cursor: pointer;
 }
 
-#open-all-unread-btn {
-  width: 100%;
-}
+
 
 .mark-all-read:hover {
   color: var(--accent-cyan);
