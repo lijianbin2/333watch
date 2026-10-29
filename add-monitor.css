@@ -684,7 +684,6 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 4px;
   width: 100%;
   padding: 0;
   font-size: 13px;
@@ -697,8 +696,7 @@ body {
 .notify-card-title {
   display: flex;
   align-items: center;
-  gap: 4px;
-  font-size: 12px;
+  gap: 8px;
   font-weight: 600;
   flex: 1 1 auto;
   min-width: 0;
@@ -706,7 +704,7 @@ body {
 }
 
 .notify-summary {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 400;
   color: var(--text-muted);
   min-width: 0;
@@ -724,7 +722,7 @@ body {
   align-items: center;
   margin-left: auto;
   flex-shrink: 0;
-  gap: 2px;
+  gap: 10px;
   white-space: nowrap;
 }
 
@@ -744,7 +742,6 @@ body {
   50% { opacity: 0.45; transform: scale(0.8); }
 }
 
-.open-all-btn,
 .mark-all-read,
 .clear-read-btn {
   white-space: nowrap;
@@ -752,20 +749,13 @@ body {
 }
 
 .mark-all-read {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--primary-link);
   cursor: pointer;
 }
 
-.open-all-btn {
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--primary-link);
-  cursor: pointer;
-}
-.open-all-btn:hover {
-  color: var(--accent-cyan);
-  text-decoration: underline;
+#open-all-unread-btn {
+  width: 100%;
 }
 .mark-all-read:hover {
   color: var(--accent-cyan);
@@ -773,7 +763,7 @@ body {
 }
 
 .clear-read-btn {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-muted);
   cursor: pointer;
 }

@@ -438,7 +438,10 @@ async function renderUnread() {
   notifyDot.classList.toggle('hidden', unread === 0);
   notifyCard.classList.toggle('has-unread', unread > 0);
   markAllReadBtn.classList.toggle('hidden', unread === 0);
-  if (openAllUnreadBtn) openAllUnreadBtn.classList.toggle('hidden', unread === 0);
+  if (openAllUnreadBtn) {
+    openAllUnreadBtn.classList.toggle('hidden', unread === 0 || !historyExpanded);
+    if (unread > 0) openAllUnreadBtn.textContent = '打开全部未读（' + unread + '）';
+  }
   const hasRead = history.some((h) => h.read);
   if (clearReadBtn) clearReadBtn.classList.toggle('hidden', !hasRead);
   if (unread > 0) {
@@ -458,6 +461,7 @@ historyToggle.addEventListener('click', async () => {
   if (historyExpanded) {
     await renderHistoryList();
   }
+  await renderUnread();
 });
 
 markAllReadBtn.addEventListener('click', async (e) => {
