@@ -569,7 +569,7 @@ async function openAllUnread() {
         if (historyExpanded) await renderHistoryList();
         return;
       }
-    } catch (err2) {
+    } catch (err2) { // background 失联时回退本页直开
     }
   }
   var opened = 0;
@@ -581,7 +581,7 @@ async function openAllUnread() {
         window.open(urls[i], '_blank');
       }
       opened++;
-    } catch (err3) {
+    } catch (err3) { // 单个页面打开失败则跳过，继续其余
     }
   }
   if (opened > 0) {

@@ -757,6 +757,7 @@ body {
 #open-all-unread-btn {
   width: 100%;
 }
+
 .mark-all-read:hover {
   color: var(--accent-cyan);
   text-decoration: underline;
