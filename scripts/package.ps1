@@ -10,6 +10,7 @@ $files = @(
   'add-monitor.js',
   'background.js',
   'icons',
+  '_locales',
   'manifest.json',
   'offscreen.html',
   'offscreen.js',
