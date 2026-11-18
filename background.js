@@ -114,9 +114,22 @@ function looksLikeEpochValue(value) {
  * 判定必须落在稳定身份上：身份相同 = 只是 token 抖动，维持抑制；身份不同 =
  * 版本真的换了，必须放行。非 URL 值（文本监控）原样返回。
  */
+// 文本比较前先抹平不可见差异。零宽字符（U+200B~U+200D、U+2060、U+FEFF）不占位、
+// 肉眼看不见，却实实在在进 textContent：页面脚本、翻译插件、复制粘贴都可能插一个，
+// 单向比较就会把"完全没变"判成变化。空白折叠放在这里而不是只靠提取端，
+// 是为了让存量基线（升级前写入的、没折叠过的值）也能和新抓取值对上。
+// 只在**比较**时做，不回写存储，避免升级瞬间把所有旧记录判成变化。
+const INVISIBLE_TEXT_RE = /[\u200B-\u200D\u2060\uFEFF]/g;
+function canonicalCompareText(value) {
+  return String(value == null ? '' : value)
+    .replace(INVISIBLE_TEXT_RE, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function stableValueIdentity(value, attribute) {
   const raw = value == null ? '' : String(value);
-  if (attribute !== 'href' && attribute !== 'src') return raw;
+  if (attribute !== 'href' && attribute !== 'src') return canonicalCompareText(raw);
   let u;
   try { u = new URL(raw); } catch { return raw; }
   // fragment 绝不剥掉：SPA 的 hash 路由（#/v/1.0 -> #/v/2.0）和锚点变体
@@ -487,8 +500,11 @@ async function savePickedMonitor(pick, attribute) {
         invalid: false,
         invalidReason: '',
         invalidSince: null,
-        // 创建即基线：element 拾取时已有精确值，首检即可判定变化，不再浪费一次“仅基线”周期
-        baselined: true,
+        // 拾取值来自已渲染的 DOM（可能被页面翻译、皮肤脚本、登录态改过），
+        // 而检查读的是服务端返回的 HTML。两者不同源时"创建即基线"会让首检
+        // 必然判成变化，凭空发一条"变了"的误报。这里标记成待基线，
+        // 保存后立刻静默抓一次网页，用抓取结果当基线。
+        baselined: false,
         lastCheck: checkedAt,
         lastCheckTime: nowTs,
         nextCheckTime: nowTs + interval * 60000
@@ -515,8 +531,8 @@ async function savePickedMonitor(pick, attribute) {
       invalid: false,
       invalidReason: '',
       invalidSince: null,
-      // 创建即基线：首检即可判定变化
-      baselined: true,
+      // 同 updated 分支：基线必须与检查同源，先抓取再定基线
+      baselined: false,
       lastHash: '',
       lastCheck: checkedAt,
       lastCheckTime: nowTs,
@@ -527,6 +543,21 @@ async function savePickedMonitor(pick, attribute) {
   });
   if (!outcome.saved) return { ok: false, error: '保存监控失败' };
   dbg('[333 Watcher] picked monitor ' + outcome.result.mode + ':', outcome.result.id);
+  // 静默补一次"同源基线"：抓取失败也不打扰用户，下一轮定时检查会再试；
+  // 期间 baselined 仍为 false，任何差异都不会触发通知。
+  const baselineId = outcome.result.id;
+  (async () => {
+    try {
+      const list = await getMonitors();
+      const fresh = list.find((x) => x.id === baselineId);
+      if (fresh && fresh.baselined === false) {
+        const r = await checkMonitor(fresh);
+        dbg('[333 Watcher] picked baseline check:', baselineId, r);
+      }
+    } catch (err) {
+      dbg('[333 Watcher] picked baseline check failed:', err && err.message);
+    }
+  })();
   return { ok: true, mode: outcome.result.mode, id: outcome.result.id };
 }
 
@@ -800,8 +831,10 @@ async function checkElement(monitor, html) {
   const attribute = monitor.attribute || 'text';
   const resp = await queryElementValue(html, monitor.selector, attribute);
 
-  if ((!resp || !resp.ok) && monitor.lastValue) {
+  if ((!resp || !resp.ok) && monitor.lastValue && monitor.baselined !== false) {
     // 选择器失效自愈：支持 text/href/src 按 lastValue 找回元素
+    // 还没建立同源基线（baselined=false）时不做自愈：那时的 lastValue 来自渲染态
+    // DOM，可能带着翻译插件插入的文本，拿它去服务端 HTML 里找元素只会找回错的节点。
     const found = await findElementByValue(monitor.url, html, monitor.lastValue, attribute);
     if (found && found.ok) {
       dbg('[333 Watcher] [element] selector healed:', found.selector, 'attr:', attribute);

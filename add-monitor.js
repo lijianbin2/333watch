@@ -331,6 +331,20 @@ async function saveMonitors(monitors) {
 // monitors 整键读-改-写：popup 页面和后台是两个 JS 上下文，页面直写会整键覆盖掉后台刚写入的
 // 检查基线（丢监控 / 基线回滚 / 重复通知）。因此写入统一交给 background 串行化执行；
 // fallback 供无法与 background 通信时（如本地预览直开 html）由调用方自行直写。
+// 保存后静默重建基线：拾取读的是渲染态 DOM（可能被翻译插件/皮肤脚本/登录态改过），
+// 检查读的是服务端 HTML。两者不同源时拿渲染态当基线，首检必然判成"变化"并凭空
+// 发一条误报。这里让后台立刻抓一次网页，用抓取结果当基线；抓取失败就等下一轮
+// 定时检查，期间 baselined=false，任何差异都不会触发通知。
+function requestSilentBaseline(id) {
+  if (!hasChromeStorage || !id || !chrome.runtime || !chrome.runtime.sendMessage) return;
+  try {
+    const p = chrome.runtime.sendMessage({ type: 'check-now', id: id });
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+  } catch (err) {
+    dbg('[333 Watcher] silent baseline request failed:', err && err.message);
+  }
+}
+
 async function mutateMonitorsViaBackground(msg, fallback) {
   if (!(hasChromeStorage && chrome.runtime && chrome.runtime.sendMessage)) {
     // 透传 fallback 的返回值：导入兜底要靠它回报真实的新增条数，
@@ -965,7 +979,9 @@ form.addEventListener('submit', async (e) => {
       updated.updatedAt = editNowTs;
       updated.eventSeq = Number(old.eventSeq) || 0;
       monitors[idx] = updated;
-      await mutateMonitorsViaBackground({ op: 'upsert', monitor: updated }, () => saveMonitors(monitors));
+      const savedEdit = await mutateMonitorsViaBackground({ op: 'upsert', monitor: updated }, () => saveMonitors(monitors));
+
+      requestSilentBaseline(savedEdit && savedEdit.id);
       await closePagePicker();
       dbg('[333 Watcher] Monitor updated:', updated);
       exitEditMode();
@@ -1014,7 +1030,9 @@ async function addMonitor(data) {
   let nextCheckTime = 0;
   if (data.type === 'element' && pickedElement) {
     lastValue = attributeValue(pickedElement, attribute);
-    baselined = true;
+    // 拾取读的是已渲染 DOM（可能被翻译插件/皮肤脚本/登录态改过），检查读的是服务端 HTML；
+    // 两者可能天生不同。先标成待基线，保存后立刻抓一次网页取真值，首检只建基线不通知。
+    baselined = false;
     lastCheck = checkedAt;
     lastCheckTime = nowTs;
     nextCheckTime = nowTs + interval * 60000;
@@ -1054,7 +1072,9 @@ async function addMonitor(data) {
     targetText: ''
   };
   monitors.push(monitor);
-  await mutateMonitorsViaBackground({ op: 'upsert', monitor: monitor }, () => saveMonitors(monitors));
+  const savedWrite = await mutateMonitorsViaBackground({ op: 'upsert', monitor: monitor }, () => saveMonitors(monitors));
+
+  requestSilentBaseline(savedWrite && savedWrite.id);
   await closePagePicker();
   dbg('[333 Watcher] Monitor added:', monitor);
   await clearPendingPick();
@@ -1110,7 +1130,8 @@ confirmOverwriteBtn.addEventListener('click', async () => {
         updated.attribute = getSelectedAttribute();
         updated.lastValue = attributeValue(pickedElement, updated.attribute);
         updated.lastHash = '';
-        updated.baselined = true;
+        // 同上：改监控也要用抓取结果重建基线
+        updated.baselined = false;
         updated.lastCheck = overwriteCheckedAt;
         updated.lastCheckTime = overwriteNowTs;
         updated.nextCheckTime = overwriteNowTs + overwriteInterval * 60000;
@@ -1148,7 +1169,9 @@ confirmOverwriteBtn.addEventListener('click', async () => {
       updated.invalidSince = null;
       updated.updatedAt = overwriteNowTs;
       monitors[idx] = updated;
-      await mutateMonitorsViaBackground({ op: 'upsert', monitor: updated }, () => saveMonitors(monitors));
+      const savedEdit = await mutateMonitorsViaBackground({ op: 'upsert', monitor: updated }, () => saveMonitors(monitors));
+
+      requestSilentBaseline(savedEdit && savedEdit.id);
       await closePagePicker();
       dbg('[333 Watcher] Monitor overwritten:', updated);
     }
