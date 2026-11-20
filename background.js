@@ -962,6 +962,57 @@ async function resetFlakyRounds(monitorId) {
   }
 }
 
+// ---------------- 渲染态读取：优先用用户已经打开的那个标签页 ----------------
+// 服务端 HTML 只代表"抓取者看到的页面"。SPA、登录态、客户端算出来的数值都只存在于
+// 渲染后的 DOM 里（例如 opencode 控制台的模型数量：服务端渲染是 32，用户页面是 31）。
+// 有打开中的同页标签时优先读它；没有就退回 fetch。两种来源的值不可直接比较，
+// 切换来源时只静默重建基线（见 checkMonitor 里的 source 判断）。
+function tabUrlPattern(url) {
+  try {
+    const u = new URL(url);
+    return u.origin + u.pathname + '*';
+  } catch { return null; }
+}
+
+async function readFromOpenTab(monitor) {
+  try {
+    if (!chrome.tabs || !chrome.scripting) return null;
+    const pattern = tabUrlPattern(monitor.url);
+    if (!pattern) return null;
+    const tabs = await chrome.tabs.query({ url: pattern });
+    // 只读已经加载完成的标签：页面还在加载时 textContent 可能停在骨架屏/占位文案上，
+    // 拿它当"变化"会误报。status 拿不到时按可用处理（需要 tabs 权限才一定返回）。
+    // 同一地址开多个标签时取最近访问的那个，尽量贴近用户此刻看到的内容。
+    const usable = (tabs || [])
+      .filter((t) => t && t.id != null && !t.discarded && (!t.status || t.status === 'complete'))
+      .sort((a, b) => (Number(b.lastAccessed) || 0) - (Number(a.lastAccessed) || 0));
+    const tab = usable[0];
+    if (!tab) return null;
+    const attr = monitor.attribute || 'text';
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: (selector, attribute) => {
+        const el = document.querySelector(selector);
+        if (!el) return null;
+        if (attribute === 'href') return el.getAttribute('href') || '';
+        if (attribute === 'src') return el.getAttribute('src') || '';
+        return (el.textContent || '').replace(/\s+/g, ' ').trim();
+      },
+      args: [monitor.selector, attr]
+    });
+    const res = results && results[0];
+    if (!res || res.result == null) return null;
+    let value = res.result;
+    if ((attr === 'href' || attr === 'src') && value) {
+      try { value = new URL(value, monitor.url).href; } catch {}
+    }
+    return { value: limitMonitorValue(value, attr) };
+  } catch (err) {
+    dbg('[333 Watcher] read from open tab failed:', err && err.message);
+    return null;
+  }
+}
+
 async function checkMonitor(monitor) {
   // 🧪 测试模式：虚拟 URL 不走网络，直接按 attribute 对比 storage 值 (v0.6.17 双路)
   if (monitor.url && monitor.url.startsWith(TEST_URL_PREFIX)) {
@@ -1047,33 +1098,51 @@ async function checkMonitor(monitor) {
 
   // 微信开发者工具下载页 SPA 特殊处理：直接监控 config.json
   const isWechatDownload = monitor.url.includes('developers.weixin.qq.com/miniprogram/dev/devtools/download') || monitor.url.includes('wechat_devtools');
+  const type = monitor.type || 'page';
+  // 优先读用户当前打开的同页标签（渲染态）。读不到再退回抓取服务端 HTML。
+  let tabReading = null;
+  if (type === 'element' && monitor.selector) {
+    tabReading = await readFromOpenTab(monitor);
+    if (tabReading) dbg('[333 Watcher] element value read from open tab:', monitor.id);
+  }
   let html;
   let wechatJsonText = null;
-  try {
-    if (isWechatDownload) {
-      const jsonUrls = [
-        'https://devtools.wxqcloud.qq.com.cn/WechatWebDev/nightly/versions/config.json',
-        'https://devtools.wxqcloud.qq.com.cn/WechatWebDev/release/config.json'
-      ];
-      for (const jurl of jsonUrls) {
-        try {
-          const jres = await fetchWithTimeout(jurl, { cache: 'no-store' });
-          if (jres.ok) { wechatJsonText = await readResponseText(jres, MAX_JSON_BYTES); dbg('[333 Watcher] wechat json fetched', jurl); break; }
-        } catch {}
+  if (!tabReading) {
+    try {
+      if (isWechatDownload) {
+        const jsonUrls = [
+          'https://devtools.wxqcloud.qq.com.cn/WechatWebDev/nightly/versions/config.json',
+          'https://devtools.wxqcloud.qq.com.cn/WechatWebDev/release/config.json'
+        ];
+        for (const jurl of jsonUrls) {
+          try {
+            const jres = await fetchWithTimeout(jurl, { cache: 'no-store' });
+            if (jres.ok) { wechatJsonText = await readResponseText(jres, MAX_JSON_BYTES); dbg('[333 Watcher] wechat json fetched', jurl); break; }
+          } catch {}
+        }
+        if (!wechatJsonText) dbg('[333 Watcher] wechat json fetch failed, fallback to html');
       }
-      if (!wechatJsonText) dbg('[333 Watcher] wechat json fetch failed, fallback to html');
+      const res = await fetchWithTimeout(monitor.url, { cache: 'no-store', credentials: 'include' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      html = await readResponseText(res, MAX_HTML_BYTES);
+    } catch (err) {
+      console.error('[333 Watcher] fetch failed:', monitor.url, err.message);
+      return await markCheckFailure(monitor.id, checkedAt, err.message || 'fetch failed', 'error');
     }
-    const res = await fetchWithTimeout(monitor.url, { cache: 'no-store' });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    html = await readResponseText(res, MAX_HTML_BYTES);
-  } catch (err) {
-    console.error('[333 Watcher] fetch failed:', monitor.url, err.message);
-    return await markCheckFailure(monitor.id, checkedAt, err.message || 'fetch failed', 'error');
   }
 
-  const type = monitor.type || 'page';
   let outcome;
-  if (isWechatDownload && wechatJsonText) {
+  if (tabReading) {
+    const attr = monitor.attribute || 'text';
+    const lastValue = monitor.lastValue == null ? null : limitMonitorValue(monitor.lastValue, attr);
+    outcome = {
+      changed: lastValue !== null && !sameMonitoredValue(tabReading.value, lastValue, attr),
+      prevValue: lastValue,
+      baseValue: lastValue,
+      baseField: 'lastValue',
+      update: { lastValue: tabReading.value }
+    };
+  } else if (isWechatDownload && wechatJsonText) {
     outcome = await checkJson(monitor, wechatJsonText);
     // 兼容旧监控：若之前存的是文本/单链接，首次对接到 JSON 的 版本|链接 时不算作变更，只做自愈更新
     if (outcome && outcome.changed && monitor.lastValue && !String(monitor.lastValue).includes('|') && String(outcome.update.lastValue||'').includes('|')) {
@@ -1109,6 +1178,14 @@ async function checkMonitor(monitor) {
     } else {
       outcome = await checkPage(monitor, html);
     }
+  }
+
+  // 来源切换（标签页 <-> 抓取）不报变化：两边的值本来就可能不是同一份内容。
+  // 切换后的第一轮只把新来源的值写成基线，避免"打开/关闭标签页"就弹一次提醒。
+  const source = tabReading ? 'tab' : 'fetch';
+  if (outcome && outcome.changed && monitor.source && monitor.source !== source) {
+    dbg('[333 Watcher] source switched:', monitor.source, '->', source, '(rebaseline silently)');
+    outcome = { ...outcome, changed: false };
   }
 
   if (outcome.notFound) {
@@ -1155,6 +1232,7 @@ async function checkMonitor(monitor) {
         invalidReason: '',
         invalidSince: null,
         baselined: true,
+        source,
         // 只有"本轮没变化"才说明抖动循环真的结束了。
         // 本轮判定为变化的监控还没走完 confirmChange：它可能被判成抖动，
         // 计数必须保留下来，否则抖动分支每轮都读到 0，安全网永远不触发。
@@ -1185,7 +1263,8 @@ async function checkMonitor(monitor) {
 
   if (outcome.changed) {
     const isValueType = type === 'element' || type === 'link' || type === 'download';
-    if (isValueType) {
+    // 标签页读到的就是渲染态本身，不需要再抓一次做二次确认（抓取反而会拿到另一份内容）
+    if (isValueType && source !== 'tab') {
       const confirmRes = await confirmChange(saved, outcome.update.lastValue);
       if (!confirmRes.stable) {
         dbg('[333 Watcher] value unstable between two fetches, notification suppressed');
